@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMainWindow,
     QMenu,
+    QMenuBar,
     QPlainTextEdit,
     QPushButton,
     QMessageBox,
@@ -774,18 +775,44 @@ class PlayerAssistWindow(QMainWindow):
             self.start()
 
     def _build_ui(self) -> None:
+        self._build_menu_bar()
+
         central = QWidget()
         self.setCentralWidget(central)
         root_layout = QVBoxLayout(central)
-        root_layout.setContentsMargins(18, 18, 18, 18)
-        root_layout.setSpacing(14)
+        root_layout.setContentsMargins(20, 16, 20, 16)
+        root_layout.setSpacing(12)
 
+        header = QWidget()
+        header.setObjectName("headerWidget")
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        title_col = QVBoxLayout()
+        title_col.setSpacing(2)
         title = QLabel(APP_NAME)
         title.setObjectName("titleLabel")
-        subtitle = QLabel("Monitor RageMP chat, create alerts, and react to lines that matter to you even while the game is alt-tabbed or unfocused.")
+        subtitle = QLabel("Monitor RageMP chat and get alerts for messages that matter.")
         subtitle.setObjectName("subtitleLabel")
-        root_layout.addWidget(title)
-        root_layout.addWidget(subtitle)
+        title_col.addWidget(title)
+        title_col.addWidget(subtitle)
+        header_layout.addLayout(title_col, 1)
+        status_widget = QWidget()
+        status_widget.setObjectName("statusWidget")
+        status_layout = QHBoxLayout(status_widget)
+        status_layout.setContentsMargins(12, 6, 12, 6)
+        status_layout.setSpacing(8)
+        self.status_dot = QLabel("\u2022")
+        self.status_dot.setObjectName("statusDot")
+        self.status_value_label = QLabel("Stopped")
+        self.status_value_label.setObjectName("statusValue")
+        status_layout.addWidget(self.status_dot)
+        status_layout.addWidget(self.status_value_label)
+        header_layout.addWidget(status_widget)
+        self.version_value_label = QLabel(f"v{APP_VERSION}")
+        self.version_value_label.setObjectName("summaryLabel")
+        self.version_value_label.setToolTip("Current application version.")
+        header_layout.addWidget(self.version_value_label)
+        root_layout.addWidget(header)
 
         top_row = QHBoxLayout()
         top_row.setSpacing(12)
@@ -800,7 +827,6 @@ class PlayerAssistWindow(QMainWindow):
         self.storage_path_edit.setPlaceholderText(r"Example: E:\RAGEMP\client_resources\...\ .storage")
         browse_storage_button = QPushButton("Browse")
         browse_storage_button.clicked.connect(self._browse_storage)
-        browse_storage_button.setToolTip("Browse to the .storage file on this machine.")
         self.mention_name_edit = QLineEdit()
         self.mention_name_edit.setToolTip("Name to use for mention detection when rule type is 'mention'.")
         self.mention_name_edit.setPlaceholderText("Enter your in-game name")
@@ -813,7 +839,7 @@ class PlayerAssistWindow(QMainWindow):
 
         runtime_group = QGroupBox("Runtime")
         runtime_layout = QVBoxLayout(runtime_group)
-        runtime_layout.setSpacing(10)
+        runtime_layout.setSpacing(8)
         self.debug_checkbox = QCheckBox("Debug mode")
         self.debug_checkbox.setToolTip("Write detailed watcher and matching activity to the log.")
         self.global_mute_checkbox = QCheckBox("Global mute")
@@ -823,89 +849,44 @@ class PlayerAssistWindow(QMainWindow):
         self.theme_combo = QComboBox()
         self.theme_combo.addItems(list(THEMES.keys()))
         self.theme_combo.currentTextChanged.connect(self._on_theme_changed)
-        self.theme_combo.setToolTip("Choose the application color theme.")
         theme_row.addWidget(self.theme_combo, 1)
         replay_row = QHBoxLayout()
         replay_row.addWidget(QLabel("Replay last"))
         self.replay_spin = QSpinBox()
         self.replay_spin.setRange(0, 9999)
         self.replay_spin.setMaximumWidth(90)
-        self.replay_spin.setToolTip("Re-process the last N chat lines when the watcher starts.")
         replay_row.addWidget(self.replay_spin)
         replay_row.addStretch(1)
-        category_audio_button = QPushButton("Category Audio...")
-        category_audio_button.clicked.connect(self._open_category_overrides)
-        category_audio_button.setToolTip("Open category-wide mute and volume override settings.")
         runtime_layout.addWidget(self.debug_checkbox)
         runtime_layout.addWidget(self.global_mute_checkbox)
         runtime_layout.addLayout(theme_row)
         runtime_layout.addLayout(replay_row)
-        runtime_layout.addWidget(category_audio_button)
         runtime_layout.addStretch(1)
         top_row.addWidget(runtime_group, 1)
 
         controls_row = QHBoxLayout()
-        controls_row.setSpacing(8)
+        controls_row.setSpacing(6)
         root_layout.addLayout(controls_row)
         self.start_button = QPushButton("Start")
+        self.start_button.setObjectName("startButton")
         self.start_button.clicked.connect(self.start)
         self.start_button.setToolTip("Start watching the storage file for new chat lines.")
         self.stop_button = QPushButton("Stop")
+        self.stop_button.setObjectName("stopButton")
         self.stop_button.clicked.connect(self.stop)
         self.stop_button.setEnabled(False)
-        self.stop_button.setToolTip("Stop the watcher thread.")
-        hide_button = QPushButton("Hide Window")
-        hide_button.clicked.connect(self.hide_window)
-        hide_button.setToolTip("Minimize the app while keeping the watcher running.")
-        save_button = QPushButton("Save Config")
+        save_button = QPushButton("Save")
         save_button.clicked.connect(self.save_current_config)
-        save_button.setToolTip("Save the current settings and rules to app_config.json.")
-        settings_button = QPushButton("Settings")
-        settings_button.clicked.connect(self.open_settings_dialog)
-        settings_button.setToolTip("Open application settings.")
-        open_logs_button = QPushButton("Open Logs")
-        open_logs_button.clicked.connect(self.open_logs_folder)
-        open_logs_button.setToolTip("Open the folder where daily log files are written.")
-        open_config_button = QPushButton("Open Config")
-        open_config_button.clicked.connect(self.open_config_folder)
-        open_config_button.setToolTip("Open the portable app folder that contains app_config.json.")
-        import_button = QPushButton("Import Config")
-        import_button.clicked.connect(self.import_config)
-        import_button.setToolTip("Load detections and settings from another app_config.json file.")
-        export_button = QPushButton("Export Config")
-        export_button.clicked.connect(self.export_config)
-        export_button.setToolTip("Save the current configuration to a chosen file.")
         test_line_button = QPushButton("Test Line")
         test_line_button.clicked.connect(self.open_test_line_dialog)
-        test_line_button.setToolTip("Paste a raw chat line and preview which detections would match.")
-        about_button = QPushButton("About")
-        about_button.clicked.connect(self.open_about_dialog)
-        about_button.setToolTip("Show version, build, and location details for this app.")
-        exit_button = QPushButton("Exit")
-        exit_button.clicked.connect(self.exit_app)
-        exit_button.setToolTip("Close the application.")
+        category_audio_button = QPushButton("Category Audio\u2026")
+        category_audio_button.clicked.connect(self._open_category_overrides)
         controls_row.addWidget(self.start_button)
         controls_row.addWidget(self.stop_button)
-        controls_row.addWidget(hide_button)
+        controls_row.addSpacing(8)
         controls_row.addWidget(save_button)
-        controls_row.addWidget(settings_button)
-        controls_row.addWidget(open_logs_button)
-        controls_row.addWidget(open_config_button)
-        controls_row.addWidget(import_button)
-        controls_row.addWidget(export_button)
         controls_row.addWidget(test_line_button)
-        controls_row.addWidget(about_button)
-        controls_row.addWidget(exit_button)
-        controls_row.addSpacing(18)
-        controls_row.addWidget(QLabel("Status"))
-        self.status_value_label = QLabel("Stopped")
-        self.status_value_label.setObjectName("statusValue")
-        controls_row.addWidget(self.status_value_label)
-        self.version_value_label = QLabel(f"v{APP_VERSION}")
-        self.version_value_label.setObjectName("summaryLabel")
-        self.version_value_label.setToolTip("Current application version.")
-        controls_row.addSpacing(12)
-        controls_row.addWidget(self.version_value_label)
+        controls_row.addWidget(category_audio_button)
         controls_row.addStretch(1)
 
         body_splitter = QSplitter(Qt.Vertical)
@@ -918,12 +899,11 @@ class PlayerAssistWindow(QMainWindow):
 
         detections_group = QGroupBox("Detections")
         detections_layout = QVBoxLayout(detections_group)
-        detections_layout.setSpacing(10)
+        detections_layout.setSpacing(8)
         filter_row = QHBoxLayout()
         filter_row.addWidget(QLabel("Category"))
         self.filter_category_combo = QComboBox()
         self.filter_category_combo.currentIndexChanged.connect(self._populate_detection_list)
-        self.filter_category_combo.setToolTip("Filter the list to one detection category.")
         filter_row.addWidget(self.filter_category_combo)
         self.detection_summary_label = QLabel("")
         self.detection_summary_label.setObjectName("summaryLabel")
@@ -934,19 +914,16 @@ class PlayerAssistWindow(QMainWindow):
         self.detection_list = QListWidget()
         self.detection_list.currentItemChanged.connect(self._on_detection_selected)
         self.detection_list.itemDoubleClicked.connect(lambda _item: self._edit_selected_detection())
-        self.detection_list.setToolTip("Select a rule to view its summary. Double-click to edit it.")
         detections_layout.addWidget(self.detection_list, 1)
 
         detection_buttons = QHBoxLayout()
+        detection_buttons.setSpacing(6)
         add_button = QPushButton("Add")
         add_button.clicked.connect(self._add_detection)
-        add_button.setToolTip("Create a new detection rule.")
         edit_button = QPushButton("Edit")
         edit_button.clicked.connect(self._edit_selected_detection)
-        edit_button.setToolTip("Open the selected detection in an editor dialog.")
         remove_button = QPushButton("Remove")
         remove_button.clicked.connect(self._remove_detection)
-        remove_button.setToolTip("Delete the selected detection rule.")
         detection_buttons.addWidget(add_button)
         detection_buttons.addWidget(edit_button)
         detection_buttons.addWidget(remove_button)
@@ -956,14 +933,17 @@ class PlayerAssistWindow(QMainWindow):
 
         overview_group = QGroupBox("Selected Detection")
         overview_layout = QFormLayout(overview_group)
-        overview_layout.setHorizontalSpacing(12)
-        overview_layout.setVerticalSpacing(10)
+        overview_layout.setContentsMargins(16, 20, 16, 16)
+        overview_layout.setHorizontalSpacing(16)
+        overview_layout.setVerticalSpacing(12)
         self.selected_name_value = QLabel("No detection selected")
+        self.selected_name_value.setObjectName("overviewValueBold")
         self.selected_category_value = QLabel("-")
         self.selected_type_value = QLabel("-")
         self.selected_sound_value = QLabel("-")
         self.selected_behavior_value = QLabel("-")
         self.selected_status_value = QLabel("-")
+        self.selected_status_value.setObjectName("overviewStatus")
         overview_layout.addRow("Name", self.selected_name_value)
         overview_layout.addRow("Category", self.selected_category_value)
         overview_layout.addRow("Type", self.selected_type_value)
@@ -971,28 +951,50 @@ class PlayerAssistWindow(QMainWindow):
         overview_layout.addRow("Behavior", self.selected_behavior_value)
         overview_layout.addRow("Status", self.selected_status_value)
         center_splitter.addWidget(overview_group)
-        center_splitter.setSizes([560, 420])
+        center_splitter.setSizes([520, 440])
 
         log_group = QGroupBox("Activity Log")
         log_layout = QVBoxLayout(log_group)
+        log_layout.setSpacing(6)
         log_toolbar = QHBoxLayout()
-        clear_log_button = QPushButton("Clear Log")
+        clear_log_button = QPushButton("Clear")
         clear_log_button.clicked.connect(self._clear_log)
-        clear_log_button.setToolTip("Clear the activity log display.")
         log_toolbar.addWidget(clear_log_button)
         log_toolbar.addStretch(1)
         log_layout.addLayout(log_toolbar)
         self.log_output = QPlainTextEdit()
         self.log_output.setReadOnly(True)
         self.log_output.setLineWrapMode(QPlainTextEdit.NoWrap)
+        self.log_output.setMaximumBlockCount(2000)
         log_layout.addWidget(self.log_output, 1)
         body_splitter.addWidget(log_group)
-        body_splitter.setSizes([520, 240])
+        body_splitter.setSizes([520, 220])
 
         hide_action = QAction("Hide Window", self)
         hide_action.triggered.connect(self.hide_window)
         self.addAction(hide_action)
         self._create_tray_icon()
+
+    def _build_menu_bar(self) -> None:
+        menu_bar = self.menuBar()
+        file_menu = menu_bar.addMenu("&File")
+        file_menu.addAction("Save Config", self.save_current_config)
+        file_menu.addSeparator()
+        file_menu.addAction("Import Config\u2026", self.import_config)
+        file_menu.addAction("Export Config\u2026", self.export_config)
+        file_menu.addSeparator()
+        file_menu.addAction("Settings\u2026", self.open_settings_dialog)
+        file_menu.addSeparator()
+        file_menu.addAction("Hide to Tray", self.hide_window)
+        file_menu.addAction("Exit", self.exit_app)
+        view_menu = menu_bar.addMenu("&View")
+        view_menu.addAction("Open Logs Folder", self.open_logs_folder)
+        view_menu.addAction("Open Config Folder", self.open_config_folder)
+        tools_menu = menu_bar.addMenu("&Tools")
+        tools_menu.addAction("Test Line\u2026", self.open_test_line_dialog)
+        tools_menu.addAction("Category Audio\u2026", self._open_category_overrides)
+        help_menu = menu_bar.addMenu("&Help")
+        help_menu.addAction("About", self.open_about_dialog)
 
     def _apply_styles(self) -> None:
         theme = THEMES.get(self.config.theme, THEMES["Latte Light"])
@@ -1003,22 +1005,73 @@ class PlayerAssistWindow(QMainWindow):
                 font-family: "Segoe UI";
                 font-size: 10pt;
             }}
+            QMenuBar {{
+                background: {panel_bg};
+                border-bottom: 1px solid {border};
+                padding: 2px 0;
+                font-size: 9pt;
+            }}
+            QMenuBar::item {{
+                padding: 4px 10px;
+                border-radius: 4px;
+                background: transparent;
+            }}
+            QMenuBar::item:selected {{
+                background: {button_hover};
+            }}
+            QMenu {{
+                background: {panel_bg};
+                border: 1px solid {border};
+                border-radius: 8px;
+                padding: 4px;
+            }}
+            QMenu::item {{
+                padding: 6px 24px 6px 12px;
+                border-radius: 4px;
+                background: transparent;
+            }}
+            QMenu::item:selected {{
+                background: {accent};
+                color: {accent_text};
+            }}
+            QMenu::separator {{
+                height: 1px;
+                background: {border};
+                margin: 4px 8px;
+            }}
             QGroupBox {{
                 background: {panel_bg};
                 border: 1px solid {border};
-                border-radius: 10px;
-                margin-top: 10px;
+                border-top: none;
+                border-radius: 0 0 10px 10px;
+                margin-top: 22px;
                 font-weight: 600;
-                padding-top: 12px;
+                padding: 10px 12px 12px 12px;
             }}
             QGroupBox::title {{
                 subcontrol-origin: margin;
-                left: 12px;
-                padding: 0 4px;
+                subcontrol-position: top left;
+                left: 0;
+                top: 0;
+                padding: 4px 14px;
+                background: {border};
                 color: {text};
+                font-size: 9pt;
+                font-weight: 700;
+                letter-spacing: 0.5px;
+                border-radius: 6px 6px 0 0;
+            }}
+            QGroupBox QLabel, QGroupBox QCheckBox, QGroupBox QRadioButton {{
+                background: transparent;
+            }}
+            QWidget#statusWidget QLabel {{
+                background: transparent;
+            }}
+            QWidget#headerWidget QLabel {{
+                background: transparent;
             }}
             QLabel#titleLabel {{
-                font-size: 24pt;
+                font-size: 20pt;
                 font-weight: 700;
                 color: {text};
             }}
@@ -1030,19 +1083,40 @@ class PlayerAssistWindow(QMainWindow):
             }}
             QLabel#subtitleLabel, QLabel#summaryLabel {{
                 color: {muted_text};
+                font-size: 9pt;
             }}
             QLabel#dialogSubtitleLabel, QLabel#hintLabel {{
                 color: {muted_text};
             }}
+            QLabel#statusDot {{
+                font-size: 16pt;
+                color: {accent};
+            }}
             QLabel#statusValue {{
                 color: {text};
                 font-weight: 600;
+                font-size: 10pt;
+            }}
+            QLabel#overviewValueBold {{
+                font-weight: 600;
+                font-size: 11pt;
+                color: {text};
+            }}
+            QLabel#overviewStatus {{
+                font-weight: 600;
+                color: {accent};
+            }}
+            QWidget#statusWidget {{
+                background: {panel_bg};
+                border: 1px solid {border};
+                border-radius: 8px;
             }}
             QPushButton {{
                 background: {button_bg};
                 border: 1px solid {border};
-                border-radius: 8px;
-                padding: 7px 12px;
+                border-radius: 6px;
+                padding: 6px 14px;
+                font-size: 9pt;
             }}
             QPushButton:hover {{
                 background: {button_hover};
@@ -1050,34 +1124,84 @@ class PlayerAssistWindow(QMainWindow):
             QPushButton:pressed {{
                 background: {button_pressed};
             }}
+            QPushButton:disabled {{
+                opacity: 0.5;
+            }}
+            QPushButton#startButton {{
+                background: {accent};
+                color: {accent_text};
+                border: 1px solid {accent};
+                font-weight: 600;
+                padding: 7px 18px;
+            }}
+            QPushButton#startButton:hover {{
+                border: 1px solid {text};
+            }}
+            QPushButton#startButton:disabled {{
+                opacity: 0.4;
+            }}
+            QPushButton#stopButton {{
+                font-weight: 600;
+                padding: 7px 18px;
+            }}
             QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QPlainTextEdit, QListWidget {{
                 background: {input_bg};
                 border: 1px solid {border};
+                border-radius: 6px;
+                padding: 6px 8px;
+                selection-background-color: {accent};
+                selection-color: {accent_text};
+            }}
+            QLineEdit:focus, QPlainTextEdit:focus {{
+                border: 1px solid {accent};
+            }}
+            QListWidget {{
                 border-radius: 8px;
-                padding: 6px;
+                outline: none;
             }}
             QListWidget::item {{
-                padding: 6px 8px;
+                padding: 7px 10px;
+                border-radius: 6px;
+                margin: 1px 2px;
             }}
             QListWidget::item:selected {{
                 background: {accent};
                 color: {accent_text};
-                border-radius: 6px;
+            }}
+            QListWidget::item:hover:!selected {{
+                background: {button_bg};
             }}
             QSlider::groove:horizontal {{
-                height: 8px;
-                border-radius: 4px;
+                height: 6px;
+                border-radius: 3px;
                 background: {slider_groove};
             }}
             QSlider::handle:horizontal {{
-                width: 16px;
-                margin: -5px 0;
-                border-radius: 8px;
+                width: 14px;
+                height: 14px;
+                margin: -4px 0;
+                border-radius: 7px;
                 background: {accent};
+            }}
+            QCheckBox::indicator {{
+                width: 16px;
+                height: 16px;
+                border-radius: 4px;
+                border: 1px solid {border};
+                background: {input_bg};
             }}
             QCheckBox::indicator:checked {{
                 background: {accent};
                 border: 1px solid {accent};
+            }}
+            QSplitter::handle {{
+                background: transparent;
+                height: 6px;
+                width: 6px;
+            }}
+            QPlainTextEdit[readOnly="true"] {{
+                font-family: "Cascadia Code", "Consolas", monospace;
+                font-size: 9pt;
             }}
             QDialogButtonBox {{
                 padding-top: 4px;
@@ -1162,9 +1286,10 @@ class PlayerAssistWindow(QMainWindow):
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             with log_file.open("a", encoding="utf-8") as handle:
                 handle.write(f"[{timestamp}] {message}\n")
-        except OSError:
-            # Avoid crashing the UI because a log directory is unavailable.
-            pass
+        except OSError as error:
+            if not getattr(self, "_log_write_error_shown", False):
+                self._log_write_error_shown = True
+                self.log_output.appendPlainText(f"File logging error (further errors suppressed): {error}")
 
     def _open_directory(self, path: Path, description: str) -> None:
         try:
@@ -1201,12 +1326,11 @@ class PlayerAssistWindow(QMainWindow):
         self.filtered_detection_ids = [d.id for d in detections]
         self.detection_list.clear()
         for detection in detections:
-            state = "On" if detection.enabled else "Off"
-            self.detection_list.addItem(
-                QListWidgetItem(
-                    f"{detection.name}  [{detection.category}]  {detection.rule_type}  {state}  {detection.cooldown_seconds:g}s  {detection.volume_percent}%"
-                )
-            )
+            state = "\u2713" if detection.enabled else "\u2013"
+            label = f"{state}  {detection.name}   \u2022  {detection.category}   \u2022  {detection.rule_type}"
+            if detection.cooldown_seconds > 0:
+                label += f"   \u2022  {detection.cooldown_seconds:g}s cd"
+            self.detection_list.addItem(QListWidgetItem(label))
 
         self.detection_summary_label.setText(f"{len(detections)} shown / {len(self.config.detections)} total")
         if detections:
@@ -1379,7 +1503,14 @@ class PlayerAssistWindow(QMainWindow):
         path, _ = QFileDialog.getOpenFileName(self, "Import Configuration", "", "JSON files (*.json);;All files (*.*)")
         if not path:
             return
-        imported = load_config(Path(path))
+        try:
+            import json
+            data = json.loads(Path(path).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            self._append_log(f"Failed to read import file: {error}")
+            return
+        CONFIG_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        imported = load_config()
         self.config = imported
         self.selected_detection_id = None
         self._load_config_into_form()
@@ -1470,6 +1601,16 @@ class PlayerAssistWindow(QMainWindow):
         if reason == QSystemTrayIcon.Trigger:
             self._restore_from_tray()
 
+    def _set_status(self, running: bool) -> None:
+        if running:
+            self.status_value_label.setText("Running")
+            self.status_dot.setStyleSheet("color: #4ade80;")
+        else:
+            self.status_value_label.setText("Stopped")
+            self.status_dot.setStyleSheet("")
+        self.start_button.setEnabled(not running)
+        self.stop_button.setEnabled(running)
+
     def start(self) -> None:
         if self.worker_thread is not None and self.worker_thread.isRunning():
             return
@@ -1483,30 +1624,22 @@ class PlayerAssistWindow(QMainWindow):
         self.worker_thread.watcher_finished.connect(self._on_worker_finished)
         self.worker_thread.watcher_failed.connect(self._on_worker_failed)
         self.worker_thread.start()
-        self.status_value_label.setText("Running")
-        self.start_button.setEnabled(False)
-        self.stop_button.setEnabled(True)
+        self._set_status(True)
         self._append_log("Watcher started.")
 
     def stop(self) -> None:
         if self.worker_thread is not None:
             self.worker_thread.stop()
-        self.status_value_label.setText("Stopped")
-        self.start_button.setEnabled(True)
-        self.stop_button.setEnabled(False)
+        self._set_status(False)
         self._append_log("Watcher stopping.")
 
     def _on_worker_finished(self) -> None:
-        self.status_value_label.setText("Stopped")
-        self.start_button.setEnabled(True)
-        self.stop_button.setEnabled(False)
+        self._set_status(False)
         self.worker_thread = None
 
     def _on_worker_failed(self, error: str) -> None:
         self._append_log(f"Watcher failed: {error}")
-        self.status_value_label.setText("Stopped")
-        self.start_button.setEnabled(True)
-        self.stop_button.setEnabled(False)
+        self._set_status(False)
         self.worker_thread = None
 
     def hide_window(self) -> None:
@@ -1559,7 +1692,9 @@ class PlayerAssistWindow(QMainWindow):
 
 
 def launch() -> None:
+    QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
     app = QApplication.instance() or QApplication([])
+    app.setStyle("Fusion")
     window = PlayerAssistWindow()
     window.show()
     app.exec()

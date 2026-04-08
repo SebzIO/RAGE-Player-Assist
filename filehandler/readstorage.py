@@ -45,12 +45,16 @@ def _find_new_lines(previous_lines: list[str], current_lines: list[str]) -> list
     if not previous_lines:
         return current_lines
 
+    # Find where the last line of the previous snapshot appears in current lines.
+    # Then verify the preceding lines match to confirm the overlap position.
+    anchor = previous_lines[-1]
     max_overlap = min(len(previous_lines), len(current_lines))
-    for overlap in range(max_overlap, -1, -1):
-        if overlap == 0:
-            return current_lines
 
-        if previous_lines[-overlap:] == current_lines[:overlap]:
+    for candidate_pos in range(max_overlap - 1, -1, -1):
+        if current_lines[candidate_pos] != anchor:
+            continue
+        overlap = candidate_pos + 1
+        if overlap <= len(previous_lines) and previous_lines[-overlap:] == current_lines[:overlap]:
             return current_lines[overlap:]
 
     return current_lines

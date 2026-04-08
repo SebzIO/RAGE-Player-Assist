@@ -27,4 +27,4 @@ if ($LASTEXITCODE -ne 0) {
     throw "Missing required build dependencies. Install PyInstaller, pygame, and PySide6 into the project .venv before building."
 }
 
-& $python -m PyInstaller --noconfirm "$PSScriptRoot\gtaw_admin_assistant.spec"
+& $python -m PyInstaller --noconfirm "$PSScriptRoot\rage_player_assist.spec"

@@ -14,7 +14,7 @@ from filehandler.readstorage import watch_chat
 
 LogFunc = Callable[[str], None]
 _MCI_SEND_STRING = ctypes.windll.winmm.mciSendStringW
-_PLAYBACK_ALIAS = "gtaw_player_assistant_alert"
+_MCI_ALIAS_COUNTER = 0
 
 try:
     import pygame
@@ -62,10 +62,13 @@ def _play_sound_with_pygame(sound_path: Path, logger: LogFunc, volume_percent: i
 
 
 def _play_sound_with_mci(sound_path: Path, logger: LogFunc, volume_percent: int) -> None:
-    _MCI_SEND_STRING(f"close {_PLAYBACK_ALIAS}", None, 0, 0)
+    global _MCI_ALIAS_COUNTER
+    _MCI_ALIAS_COUNTER += 1
+    alias = f"rpa_alert_{_MCI_ALIAS_COUNTER}"
+
     media_type = "mpegvideo" if sound_path.suffix.lower() == ".mp3" else "waveaudio"
     open_result = _MCI_SEND_STRING(
-        f'open "{sound_path}" type {media_type} alias {_PLAYBACK_ALIAS}',
+        f'open "{sound_path}" type {media_type} alias {alias}',
         None,
         0,
         0,
@@ -76,7 +79,7 @@ def _play_sound_with_mci(sound_path: Path, logger: LogFunc, volume_percent: int)
 
     clamped_volume = max(0, min(100, int(volume_percent)))
     volume_result = _MCI_SEND_STRING(
-        f"setaudio {_PLAYBACK_ALIAS} volume to {clamped_volume * 10}",
+        f"setaudio {alias} volume to {clamped_volume * 10}",
         None,
         0,
         0,
@@ -84,10 +87,10 @@ def _play_sound_with_mci(sound_path: Path, logger: LogFunc, volume_percent: int)
     if volume_result != 0:
         logger(f"Unable to set sound volume for: {sound_path}")
 
-    play_result = _MCI_SEND_STRING(f"play {_PLAYBACK_ALIAS} from 0", None, 0, 0)
+    play_result = _MCI_SEND_STRING(f"play {alias} from 0 notify", None, 0, 0)
     if play_result != 0:
         logger(f"Unable to play sound file: {sound_path}")
-        _MCI_SEND_STRING(f"close {_PLAYBACK_ALIAS}", None, 0, 0)
+        _MCI_SEND_STRING(f"close {alias}", None, 0, 0)
 
 
 def _play_sound(sound_path: str, logger: LogFunc, volume_percent: int = 100, muted: bool = False) -> None:

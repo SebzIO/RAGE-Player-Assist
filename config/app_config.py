@@ -33,7 +33,7 @@ RESOURCE_DIR = _resource_base_dir()
 CONFIG_FILE = APP_DIR / "app_config.json"
 DEFAULT_STORAGE_PATH = ""
 APP_NAME = "RAGE Player Assist"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.0.1"
 
 
 @dataclass

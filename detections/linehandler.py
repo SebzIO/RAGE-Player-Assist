@@ -1,108 +1,274 @@
-"""Detection rules for parsed RageMP chat lines."""
+"""Config-driven detection rules for parsed RageMP chat lines."""
+from __future__ import annotations
+
 import ctypes
+import re
+import time
 from pathlib import Path
-from dataclasses import dataclass
+from threading import Event
 from typing import Callable
 
+from config.app_config import AppConfig, CategoryOverride, DetectionConfig, load_config
 from filehandler.readstorage import watch_chat
 
 
-MatchFunc = Callable[[str, str, bool], bool]
-ActionFunc = Callable[[str], None]
-BASE_DIR = Path(__file__).resolve().parent.parent
-SOUNDS_DIR = BASE_DIR / "sounds"
-MENTION_SOUND = SOUNDS_DIR / "mentioned.wav"
-PM_SOUND = SOUNDS_DIR / "incomingpm.wav"
-REPORT_SOUND = SOUNDS_DIR / "newreport.wav"
+LogFunc = Callable[[str], None]
 _MCI_SEND_STRING = ctypes.windll.winmm.mciSendStringW
-_PLAYBACK_ALIAS = "gtaw_admin_assistant_alert"
+_PLAYBACK_ALIAS = "gtaw_player_assistant_alert"
+
+try:
+    import pygame
+except ImportError:
+    pygame = None
+
+_PYGAME_READY = False
 
 
-@dataclass(frozen=True)
-class DetectionRule:
-    name: str
-    match: MatchFunc
-    action: ActionFunc
+def _default_logger(message: str) -> None:
+    print(message)
 
 
-def _play_sound(sound_path: Path) -> None:
-    if not sound_path.exists():
-        print(f"Missing sound file: {sound_path}")
-        return
+def _init_pygame_audio(logger: LogFunc) -> bool:
+    global _PYGAME_READY
 
-    close_result = _MCI_SEND_STRING(f"close {_PLAYBACK_ALIAS}", None, 0, 0)
+    if pygame is None:
+        return False
+
+    if _PYGAME_READY:
+        return True
+
+    try:
+        pygame.mixer.init()
+    except Exception as error:
+        logger(f"pygame audio init failed, using Windows fallback: {error}")
+        return False
+
+    _PYGAME_READY = True
+    return True
+
+
+def _play_sound_with_pygame(sound_path: Path, logger: LogFunc, volume_percent: int) -> bool:
+    if not _init_pygame_audio(logger):
+        return False
+
+    try:
+        sound = pygame.mixer.Sound(str(sound_path))
+        sound.set_volume(max(0, min(100, volume_percent)) / 100.0)
+        sound.play()
+        return True
+    except Exception as error:
+        logger(f"pygame playback failed, using Windows fallback: {error}")
+        return False
+
+
+def _play_sound_with_mci(sound_path: Path, logger: LogFunc, volume_percent: int) -> None:
+    _MCI_SEND_STRING(f"close {_PLAYBACK_ALIAS}", None, 0, 0)
+    media_type = "mpegvideo" if sound_path.suffix.lower() == ".mp3" else "waveaudio"
     open_result = _MCI_SEND_STRING(
-        f'open "{sound_path}" alias {_PLAYBACK_ALIAS}',
+        f'open "{sound_path}" type {media_type} alias {_PLAYBACK_ALIAS}',
         None,
         0,
         0,
     )
     if open_result != 0:
-        print(f"Unable to open sound file: {sound_path}")
+        logger(f"Unable to open sound file: {sound_path}")
         return
+
+    clamped_volume = max(0, min(100, int(volume_percent)))
+    volume_result = _MCI_SEND_STRING(
+        f"setaudio {_PLAYBACK_ALIAS} volume to {clamped_volume * 10}",
+        None,
+        0,
+        0,
+    )
+    if volume_result != 0:
+        logger(f"Unable to set sound volume for: {sound_path}")
 
     play_result = _MCI_SEND_STRING(f"play {_PLAYBACK_ALIAS} from 0", None, 0, 0)
     if play_result != 0:
-        print(f"Unable to play sound file: {sound_path}")
+        logger(f"Unable to play sound file: {sound_path}")
         _MCI_SEND_STRING(f"close {_PLAYBACK_ALIAS}", None, 0, 0)
 
 
-def _report_detected(line: str) -> None:
-    print(f"Detected admin-related line: New Player Report: {line}")
-    _play_sound(REPORT_SOUND)
+def _play_sound(sound_path: str, logger: LogFunc, volume_percent: int = 100, muted: bool = False) -> None:
+    if muted:
+        return
 
-def _pm_detected(line: str) -> None:
-    print(f"PM detected line: {line}")
-    _play_sound(PM_SOUND)
+    if not sound_path:
+        return
 
-def _mention_detected(line: str) -> None:
-    print(f"Mention detected line: {line}")
-    _play_sound(MENTION_SOUND)
+    file_path = Path(sound_path)
+    if not file_path.exists():
+        logger(f"Missing sound file: {file_path}")
+        return
 
-def _test_detected(line: str) -> None:
-    print(f"Test detection matched: {line}")
+    if _play_sound_with_pygame(file_path, logger, volume_percent):
+        return
 
-
-RULES: tuple[DetectionRule, ...] = (
-    DetectionRule(
-        name="player_report",
-        match=lambda line, normalized_line, test_mode: "has submitted a report" in normalized_line,
-        action=_report_detected,
-    ),
-    DetectionRule(
-        name="private_message",
-        match=lambda line, normalized_line, test_mode: "(( pm from (" in normalized_line,
-        action=_pm_detected,
-    ),
-    DetectionRule(
-        name="self_mention",
-        match=lambda line, normalized_line, test_mode: "sebz" in normalized_line,
-        action=_mention_detected,
-    ),
-    DetectionRule(
-        name="test_log",
-        match=lambda line, normalized_line, test_mode: test_mode and "testlog" in normalized_line,
-        action=_test_detected,
-    ),
-)
+    _play_sound_with_mci(file_path, logger, volume_percent)
 
 
-def handle_line(line: str, test_mode: bool = False, debug: bool = False) -> None:
+def play_sound_file(
+    sound_path: str,
+    logger: LogFunc | None = None,
+    volume_percent: int = 100,
+    muted: bool = False,
+) -> None:
+    _play_sound(sound_path, logger or _default_logger, volume_percent=volume_percent, muted=muted)
+
+
+def _strip_chat_timestamp(line: str) -> str:
+    return re.sub(r"^\[\d{2}:\d{2}:\d{2}\]\s*", "", line, count=1)
+
+
+def _extract_message_body(line: str) -> str:
+    content = _strip_chat_timestamp(line).strip()
+    if ": " not in content:
+        return ""
+    _speaker, message = content.split(": ", 1)
+    return message.strip()
+
+
+def _contains_name_reference(text: str, name: str) -> bool:
+    if not text or not name:
+        return False
+    pattern = rf"(?<!\w){re.escape(name)}(?!\w)"
+    return re.search(pattern, text, re.IGNORECASE) is not None
+
+
+def _extract_speaker_segment(line: str) -> str:
+    content = _strip_chat_timestamp(line).strip()
+    if ": " not in content:
+        return ""
+    speaker, _message = content.split(": ", 1)
+    return speaker.strip()
+
+
+def _matches_detection(
+    detection: DetectionConfig,
+    line: str,
+    normalized_line: str,
+    mention_name: str,
+) -> bool:
+    if not detection.enabled:
+        return False
+
+    if detection.rule_type == "contains":
+        return bool(detection.pattern) and detection.pattern.lower() in normalized_line
+
+    if detection.rule_type == "mention":
+        speaker = _extract_speaker_segment(line)
+        if _contains_name_reference(speaker, mention_name):
+            return False
+        return _contains_name_reference(_extract_message_body(line), mention_name)
+
+    if detection.rule_type == "regex":
+        if not detection.pattern:
+            return False
+        try:
+            flags = 0
+            if not detection.regex_case_sensitive:
+                flags |= re.IGNORECASE
+            if detection.regex_multiline:
+                flags |= re.MULTILINE
+            if detection.regex_dotall:
+                flags |= re.DOTALL
+            return re.search(detection.pattern, line, flags) is not None
+        except re.error:
+            return False
+
+    return False
+
+
+def _category_override_for(config: AppConfig, category: str) -> CategoryOverride | None:
+    for override in config.category_overrides:
+        if override.category == category:
+            return override
+    return None
+
+
+def get_matching_detections(line: str, config: AppConfig) -> list[DetectionConfig]:
     normalized_line = line.lower()
+    return [
+        detection
+        for detection in config.detections
+        if _matches_detection(detection, line, normalized_line, config.mention_name)
+    ]
+
+
+def handle_line(
+    line: str,
+    config: AppConfig,
+    debug: bool = False,
+    logger: LogFunc | None = None,
+    last_triggered: dict[str, float] | None = None,
+    play_sound: bool = True,
+) -> None:
+    log = logger or _default_logger
+    normalized_line = line.lower()
+    cooldown_tracker = last_triggered if last_triggered is not None else {}
 
     if debug:
-        print(f"Received line: {line}")
+        log(f"Received line: {line}")
 
-    for rule in RULES:
-        if rule.match(line, normalized_line, test_mode):
+    for detection in config.detections:
+        if _matches_detection(detection, line, normalized_line, config.mention_name):
+            now = time.monotonic()
+            last_match_time = cooldown_tracker.get(detection.id, 0.0)
+            if detection.cooldown_seconds > 0 and now - last_match_time < detection.cooldown_seconds:
+                if debug:
+                    remaining = detection.cooldown_seconds - (now - last_match_time)
+                    log(f"Suppressed by cooldown: {detection.name} ({remaining:.1f}s remaining)")
+                continue
+
+            cooldown_tracker[detection.id] = now
             if debug:
-                print(f"Matched rule: {rule.name}")
-            rule.action(line)
+                log(f"Matched rule: {detection.name}")
+
+            prefix = detection.log_message.strip() or f"Detected line for {detection.name}"
+            log(f"[{detection.category}] {prefix}: {line}")
+            category_override = _category_override_for(config, detection.category)
+            effective_muted = config.global_mute or (category_override.muted if category_override else False)
+            effective_volume = (
+                category_override.volume_percent
+                if category_override and category_override.use_volume_override
+                else detection.volume_percent
+            )
+            if play_sound:
+                _play_sound(
+                    detection.sound_path,
+                    log,
+                    volume_percent=effective_volume,
+                    muted=effective_muted,
+                )
 
 
-def main(test_mode: bool = False, debug: bool = False, replay_last: int = 0) -> None:
-    for line in watch_chat(debug=debug, replay_last=replay_last):
-        handle_line(line, test_mode=test_mode, debug=debug)
+def main(
+    config: AppConfig | None = None,
+    debug: bool = False,
+    replay_last: int = 0,
+    logger: LogFunc | None = None,
+    stop_event: Event | None = None,
+) -> None:
+    active_config = config or load_config()
+    log = logger or _default_logger
+    storage_path = Path(active_config.storage_path)
+    last_triggered: dict[str, float] = {}
+
+    for line in watch_chat(
+        storage_path=storage_path,
+        debug=debug,
+        replay_last=replay_last,
+        stop_event=stop_event,
+        logger=log,
+    ):
+        handle_line(
+            line,
+            config=active_config,
+            debug=debug,
+            logger=log,
+            last_triggered=last_triggered,
+        )
 
 
 if __name__ == "__main__":

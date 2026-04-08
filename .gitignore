@@ -1,1 +1,7 @@
 /.venv/
+/.idea/.name
+/.idea/misc.xml
+/build/
+/dist/
+/sounds/newreport.wav
+/app_config.json

@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
-"""This script runs the main loop for the GTAW Admin Assistant program."""
+"""This script runs the main loop for the RAGE Player Assist program."""
 import argparse
 
+from config.app_config import APP_NAME, load_config
 from detections.linehandler import main as run_line_handler
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run the GTAW Admin Assistant watcher.")
+    parser = argparse.ArgumentParser(description=f"Run the {APP_NAME} watcher.")
     parser.add_argument(
-        "--test",
+        "--console",
         action="store_true",
-        help="Enable test detection for lines containing 'testlog'.",
+        help="Run the watcher in console mode instead of the desktop GUI.",
     )
     parser.add_argument(
         "--debug",
@@ -29,21 +30,30 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
 
-    print("GTAW Admin Assistant is running.")
-    if args.test:
-        print("Test mode enabled. Watching for lines containing 'testlog'.")
-    if args.debug:
-        print("Debug mode enabled. Printing watcher activity and new chat lines.")
-    if args.replay_last > 0:
-        print(f"Replaying the last {args.replay_last} parsed chat line(s) on startup.")
-
     try:
-        run_line_handler(test_mode=args.test, debug=args.debug, replay_last=args.replay_last)
+        if args.console:
+            config = load_config()
+            print(f"{APP_NAME} is running.")
+            if args.debug:
+                print("Debug mode enabled. Printing watcher activity and new chat lines.")
+            if args.replay_last > 0:
+                print(f"Replaying the last {args.replay_last} parsed chat line(s) on startup.")
+            print(f"Using storage file: {config.storage_path}")
+
+            run_line_handler(
+                config=config,
+                debug=args.debug,
+                replay_last=args.replay_last,
+            )
+        else:
+            from ui.qt_gui import launch as launch_gui
+
+            launch_gui()
     except KeyboardInterrupt:
-        print("Shutting down GTAW Admin Assistant.")
+        print(f"Shutting down {APP_NAME}.")
         return 0
     except Exception as error:
-        print(f"GTAW Admin Assistant failed: {error}")
+        print(f"{APP_NAME} failed: {error}")
         return 1
 
     return 0

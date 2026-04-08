@@ -1,7 +1,12 @@
 /.venv/
-/.idea/.name
-/.idea/misc.xml
 /build/
 /dist/
-/sounds/newreport.wav
+/Logs/
 /app_config.json
+
+__pycache__/
+*.py[cod]
+
+/.idea/
+
+/sounds/newreport.wav

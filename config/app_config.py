@@ -31,7 +31,7 @@ def _resource_base_dir() -> Path:
 APP_DIR = _app_base_dir()
 RESOURCE_DIR = _resource_base_dir()
 CONFIG_FILE = APP_DIR / "app_config.json"
-DEFAULT_STORAGE_PATH = r"E:\RAGEMP\client_resources\cb242ee11d52ccd84309050503ab5242\.storage"
+DEFAULT_STORAGE_PATH = ""
 APP_NAME = "RAGE Player Assist"
 APP_VERSION = "1.0.0"
 
@@ -64,7 +64,7 @@ class CategoryOverride:
 @dataclass
 class AppConfig:
     storage_path: str = DEFAULT_STORAGE_PATH
-    mention_name: str = "Sebz"
+    mention_name: str = ""
     global_mute: bool = False
     theme: str = "Latte Light"
     close_to_tray_on_close: bool = True
@@ -163,7 +163,7 @@ def load_config(config_path: Path = CONFIG_FILE) -> AppConfig:
 
     config = AppConfig(
         storage_path=data.get("storage_path", DEFAULT_STORAGE_PATH),
-        mention_name=data.get("mention_name", "Sebz"),
+        mention_name=data.get("mention_name", ""),
         global_mute=bool(data.get("global_mute", False)),
         theme=str(data.get("theme", "Latte Light")),
         close_to_tray_on_close=bool(data.get("close_to_tray_on_close", True)),

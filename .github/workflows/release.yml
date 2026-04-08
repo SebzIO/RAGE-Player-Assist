@@ -5,6 +5,11 @@ on:
     types:
       - published
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing release tag to upload the built zip to. Leave blank to store only as a workflow artifact.
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -40,7 +45,14 @@ jobs:
         id: archive
         shell: powershell
         run: |
-          $tagName = if ("${{ github.event_name }}" -eq "release") { "${{ github.event.release.tag_name }}" } else { "manual-build" }
+          $manualTag = "${{ github.event.inputs.release_tag }}"
+          $tagName = if ("${{ github.event_name }}" -eq "release") {
+            "${{ github.event.release.tag_name }}"
+          } elseif ($manualTag) {
+            $manualTag
+          } else {
+            "manual-build"
+          }
           $assetName = "RAGE-Player-Assist-$tagName-windows.zip"
           $packageDir = "dist\RAGE Player Assist"
           $pathsToArchive = @(
@@ -51,14 +63,16 @@ jobs:
           "asset_name=$assetName" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
       - name: Upload asset to release
-        if: github.event_name == 'release'
+        if: github.event_name == 'release' || github.event.inputs.release_tag != ''
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: powershell
-        run: gh release upload "${{ github.event.release.tag_name }}" "${{ steps.archive.outputs.asset_name }}" --clobber
+        run: |
+          $tagName = if ("${{ github.event_name }}" -eq "release") { "${{ github.event.release.tag_name }}" } else { "${{ github.event.inputs.release_tag }}" }
+          gh release upload $tagName "${{ steps.archive.outputs.asset_name }}" --clobber
 
       - name: Upload workflow artifact
-        if: github.event_name != 'release'
+        if: github.event_name != 'release' && github.event.inputs.release_tag == ''
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.archive.outputs.asset_name }}

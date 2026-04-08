@@ -1,0 +1,65 @@
+name: Build Release Asset
+
+on:
+  release:
+    types:
+      - published
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows-release:
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Create virtual environment
+        shell: powershell
+        run: python -m venv .venv
+
+      - name: Install build dependencies
+        shell: powershell
+        run: |
+          .\.venv\Scripts\python.exe -m pip install --upgrade pip
+          .\.venv\Scripts\python.exe -m pip install -r requirements.txt
+
+      - name: Build executable
+        shell: powershell
+        run: .\build_exe.ps1
+
+      - name: Archive packaged app
+        id: archive
+        shell: powershell
+        run: |
+          $tagName = if ("${{ github.event_name }}" -eq "release") { "${{ github.event.release.tag_name }}" } else { "manual-build" }
+          $assetName = "RAGE-Player-Assist-$tagName-windows.zip"
+          $packageDir = "dist\RAGE Player Assist"
+          $pathsToArchive = @(
+            (Join-Path $packageDir "RAGE Player Assist.exe"),
+            (Join-Path $packageDir "_internal")
+          )
+          Compress-Archive -Path $pathsToArchive -DestinationPath $assetName -Force
+          "asset_name=$assetName" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Upload asset to release
+        if: github.event_name == 'release'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: powershell
+        run: gh release upload "${{ github.event.release.tag_name }}" "${{ steps.archive.outputs.asset_name }}" --clobber
+
+      - name: Upload workflow artifact
+        if: github.event_name != 'release'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.archive.outputs.asset_name }}
+          path: ${{ steps.archive.outputs.asset_name }}

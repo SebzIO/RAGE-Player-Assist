@@ -39,7 +39,9 @@ jobs:
 
       - name: Build executable
         shell: powershell
-        run: .\build_exe.ps1
+        run: |
+          $env:RPA_RELEASE_TAG = if ("${{ github.event_name }}" -eq "release") { "${{ github.event.release.tag_name }}" } else { "${{ github.event.inputs.release_tag }}" }
+          .\build_exe.ps1
 
       - name: Archive packaged app
         id: archive

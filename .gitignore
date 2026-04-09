@@ -3,6 +3,7 @@
 /dist/
 /Logs/
 /app_config.json
+/build_metadata.json
 
 __pycache__/
 *.py[cod]

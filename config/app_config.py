@@ -33,7 +33,24 @@ RESOURCE_DIR = _resource_base_dir()
 CONFIG_FILE = APP_DIR / "app_config.json"
 DEFAULT_STORAGE_PATH = ""
 APP_NAME = "RAGE Player Assist"
-APP_VERSION = "1.0.1"
+SOURCE_APP_VERSION = "1.0.2"
+
+
+def _load_build_metadata() -> dict[str, str]:
+    metadata_path = RESOURCE_DIR / "build_metadata.json"
+    if not metadata_path.exists():
+        return {}
+
+    try:
+        raw_metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+    return {str(key): str(value) for key, value in raw_metadata.items() if value not in (None, "")}
+
+
+BUILD_METADATA = _load_build_metadata()
+APP_VERSION = BUILD_METADATA.get("version", SOURCE_APP_VERSION)
 
 
 @dataclass
@@ -118,12 +135,30 @@ def default_logs_directory() -> Path:
 
 
 def build_stamp() -> str:
+    metadata_stamp = BUILD_METADATA.get("built_at_utc")
+    if metadata_stamp:
+        return metadata_stamp
+
     reference_path = Path(sys.executable) if getattr(sys, "frozen", False) else Path(__file__).resolve().parent.parent / "main.py"
     try:
         modified = datetime.fromtimestamp(reference_path.stat().st_mtime)
         return modified.strftime("%Y-%m-%d %H:%M")
     except OSError:
         return "Unknown"
+
+
+def build_details() -> list[str]:
+    details: list[str] = []
+
+    release_tag = BUILD_METADATA.get("release_tag")
+    if release_tag:
+        details.append(f"Release tag: {release_tag}")
+
+    commit_sha = BUILD_METADATA.get("commit_sha")
+    if commit_sha:
+        details.append(f"Commit: {commit_sha}")
+
+    return details
 
 
 def load_config(config_path: Path = CONFIG_FILE) -> AppConfig:

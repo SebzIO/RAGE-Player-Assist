@@ -48,6 +48,7 @@ from config.app_config import (
     AppConfig,
     CategoryOverride,
     DetectionConfig,
+    build_details,
     build_stamp,
     default_logs_directory,
     load_config,
@@ -1549,6 +1550,7 @@ class PlayerAssistWindow(QMainWindow):
         self._open_directory(APP_DIR, "config folder")
 
     def open_about_dialog(self) -> None:
+        detail_lines = build_details()
         QMessageBox.information(
             self,
             f"About {APP_NAME}",
@@ -1556,6 +1558,7 @@ class PlayerAssistWindow(QMainWindow):
                 [
                     f"{APP_NAME} v{APP_VERSION}",
                     f"Build: {build_stamp()}",
+                    *detail_lines,
                     f"Config file: {CONFIG_FILE}",
                     f"Default logs folder: {default_logs_directory()}",
                     "",

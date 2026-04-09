@@ -5,6 +5,38 @@ if (-not (Test-Path $python)) {
     throw "Virtual environment Python not found at $python"
 }
 
+$configModulePath = Join-Path $PSScriptRoot "config\app_config.py"
+$configModuleText = Get-Content $configModulePath -Raw
+$versionMatch = [regex]::Match($configModuleText, 'SOURCE_APP_VERSION = "([^"]+)"')
+if (-not $versionMatch.Success) {
+    throw "Could not determine SOURCE_APP_VERSION from $configModulePath"
+}
+
+$buildVersion = $versionMatch.Groups[1].Value
+$releaseTag = ($env:RPA_RELEASE_TAG ?? "").Trim()
+if ($releaseTag) {
+    $normalizedTag = if ($releaseTag.StartsWith("v")) { $releaseTag.Substring(1) } else { $releaseTag }
+    if ($normalizedTag -ne $buildVersion) {
+        throw "Release tag '$releaseTag' does not match SOURCE_APP_VERSION '$buildVersion'."
+    }
+}
+
+$commitSha = ""
+try {
+    $commitSha = (git rev-parse --short HEAD).Trim()
+} catch {
+    $commitSha = ""
+}
+
+$buildMetadataPath = Join-Path $PSScriptRoot "build_metadata.json"
+$buildMetadata = @{
+    version = $buildVersion
+    release_tag = $releaseTag
+    commit_sha = $commitSha
+    built_at_utc = (Get-Date).ToUniversalTime().ToString("yyyy-MM-dd HH:mm 'UTC'")
+}
+$buildMetadata | ConvertTo-Json | Set-Content -Path $buildMetadataPath -Encoding utf8
+
 $buildDir = Join-Path $PSScriptRoot "build"
 $distDir = Join-Path $PSScriptRoot "dist"
 if (Test-Path $buildDir) {

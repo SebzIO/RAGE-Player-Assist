@@ -8,12 +8,14 @@ from PyInstaller.building.datastruct import Tree
 
 project_dir = Path(globals().get("SPECPATH", ".")).resolve()
 sound_tree = Tree(str(project_dir / "sounds"), prefix="sounds")
+build_metadata_file = project_dir / "build_metadata.json"
+datas = [(str(build_metadata_file), ".")] if build_metadata_file.exists() else []
 
 analysis = Analysis(
     ["main.py"],
     pathex=[str(project_dir)],
     binaries=[],
-    datas=[],
+    datas=datas,
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

@@ -223,7 +223,7 @@ Important files and folders:
 - `ui/`: desktop UI
 - `sounds/`: bundled alert sounds
 - `build_exe.ps1`: local build script
-- `gtaw_admin_assistant.spec`: PyInstaller spec
+- `rage_player_assist.spec`: PyInstaller spec
 
 ## Technical Notes
 

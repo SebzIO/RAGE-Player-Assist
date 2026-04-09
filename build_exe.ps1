@@ -13,7 +13,10 @@ if (-not $versionMatch.Success) {
 }
 
 $buildVersion = $versionMatch.Groups[1].Value
-$releaseTag = ($env:RPA_RELEASE_TAG ?? "").Trim()
+$releaseTag = ""
+if ($null -ne $env:RPA_RELEASE_TAG) {
+    $releaseTag = $env:RPA_RELEASE_TAG.Trim()
+}
 if ($releaseTag) {
     $normalizedTag = if ($releaseTag.StartsWith("v")) { $releaseTag.Substring(1) } else { $releaseTag }
     if ($normalizedTag -ne $buildVersion) {

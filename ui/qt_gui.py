@@ -2767,7 +2767,7 @@ function Invoke-WithRetry {{
             if ($attempt -eq $Attempts) {{
                 throw
             }}
-            Write-Log "$Description failed on attempt $attempt: $($_.Exception.Message)"
+            Write-Log "$Description failed on attempt ${attempt}: $($_.Exception.Message)"
             Start-Sleep -Milliseconds $DelayMs
         }}
     }}

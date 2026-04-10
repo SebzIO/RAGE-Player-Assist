@@ -75,7 +75,16 @@ This gives you enough control to build simple alerting or more specific pattern-
 
 ### Download a Release
 
-If a packaged release is available, download the Windows zip from the repository’s Releases page.
+If a packaged release is available, you can choose between:
+
+- a portable Windows zip
+- a Windows `.msi` installer
+
+The portable zip is for users who want to place the app wherever they like and keep it self-contained.
+
+The `.msi` installer is for users who want a standard Windows install and uninstall flow.
+
+If you choose the portable package, download the Windows zip from the repository’s Releases page.
 
 After extracting it, keep these together in the same folder:
 
@@ -85,6 +94,8 @@ After extracting it, keep these together in the same folder:
 Then launch `RAGE Player Assist.exe`.
 
 Because the executable is currently unsigned, Windows SmartScreen may show a warning before first launch. That is expected for unsigned desktop applications distributed outside the Microsoft Store. If you are downloading the build from this repository’s official Releases page, that warning is about the missing code-signing certificate rather than proof that the app is malicious.
+
+If you choose the installer package, run the `.msi` file and follow the Windows Installer prompts. Uninstall is handled through the normal Windows installed apps/programs flow.
 
 ### Run From Source
 
@@ -201,8 +212,9 @@ The repository includes a GitHub Actions workflow at `.github/workflows/release.
 That workflow is intended to:
 
 - build the Windows package
-- zip the actual packaged app contents
-- upload the zip to a GitHub release
+- produce a portable zip
+- produce an `.msi` installer
+- upload both to a GitHub release
 
 Typical release flow:
 

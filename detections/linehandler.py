@@ -199,6 +199,66 @@ def get_matching_detections(line: str, config: AppConfig) -> list[DetectionConfi
     ]
 
 
+def explain_detection_match(detection: DetectionConfig, line: str, mention_name: str) -> tuple[bool, str]:
+    normalized_line = line.lower()
+
+    if not detection.enabled:
+        return False, "Rule is disabled."
+
+    if detection.rule_type == "contains":
+        pattern = detection.pattern.strip()
+        if not pattern:
+            return False, "Contains rule has no pattern."
+        matched = pattern.lower() in normalized_line
+        return matched, (
+            f"Contains match on '{pattern}'."
+            if matched
+            else f"Line does not contain '{pattern}'."
+        )
+
+    if detection.rule_type == "mention":
+        if not mention_name.strip():
+            return False, "Mention rule requires a configured mention name."
+        speaker = _extract_speaker_segment(line)
+        if _contains_name_reference(speaker, mention_name):
+            return False, "Mention appears in the speaker segment, so it is ignored."
+        message_body = _extract_message_body(line)
+        matched = _contains_name_reference(message_body, mention_name)
+        return matched, (
+            f"Mention name '{mention_name}' found in the message body."
+            if matched
+            else f"Mention name '{mention_name}' was not found in the message body."
+        )
+
+    if detection.rule_type == "regex":
+        pattern = detection.pattern.strip()
+        if not pattern:
+            return False, "Regex rule has no pattern."
+        flags = 0
+        flag_labels: list[str] = []
+        if not detection.regex_case_sensitive:
+            flags |= re.IGNORECASE
+            flag_labels.append("ignore-case")
+        if detection.regex_multiline:
+            flags |= re.MULTILINE
+            flag_labels.append("multiline")
+        if detection.regex_dotall:
+            flags |= re.DOTALL
+            flag_labels.append("dotall")
+        try:
+            matched = re.search(pattern, line, flags) is not None
+        except re.error as error:
+            return False, f"Invalid regex pattern: {error}"
+        flag_text = f" Flags: {', '.join(flag_labels)}." if flag_labels else ""
+        return matched, (
+            f"Regex matched pattern '{pattern}'.{flag_text}"
+            if matched
+            else f"Regex did not match pattern '{pattern}'.{flag_text}"
+        )
+
+    return False, f"Unsupported rule type: {detection.rule_type}"
+
+
 def handle_line(
     line: str,
     config: AppConfig,

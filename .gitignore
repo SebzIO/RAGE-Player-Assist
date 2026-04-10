@@ -4,6 +4,10 @@
 /Logs/
 /app_config.json
 /build_metadata.json
+/installer/GeneratedFiles.wxs
+/installer/Product.Generated.wxs
+/installer/ProductVersion.wxi
+/installer/obj/
 
 __pycache__/
 *.py[cod]

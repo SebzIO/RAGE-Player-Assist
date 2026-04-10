@@ -1,15 +1,22 @@
 """Qt GUI for the RAGE Player Assist app."""
 from __future__ import annotations
 
+import json
 import os
 import re
+import subprocess
+import sys
+import tempfile
 import threading
+import urllib.error
+import urllib.request
+import webbrowser
 from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
 
 from PySide6.QtCore import QSignalBlocker, Qt, QThread, Signal
-from PySide6.QtGui import QAction, QBrush, QCloseEvent, QColor, QFont, QIcon, QPainter, QPen, QPixmap
+from PySide6.QtGui import QAction, QBrush, QCloseEvent, QColor, QFont, QIcon, QPainter, QPen, QPixmap, QTextCursor
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -22,6 +29,7 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -32,8 +40,10 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QMessageBox,
+    QProgressDialog,
     QSlider,
     QSpinBox,
+    QStackedWidget,
     QSplitter,
     QSystemTrayIcon,
     QVBoxLayout,
@@ -45,6 +55,10 @@ from config.app_config import (
     APP_VERSION,
     CONFIG_FILE,
     APP_DIR,
+    GITHUB_RELEASES_API,
+    GITHUB_LATEST_RELEASE_API,
+    GITHUB_RELEASES_URL,
+    RESOURCE_DIR,
     AppConfig,
     CategoryOverride,
     DetectionConfig,
@@ -54,7 +68,7 @@ from config.app_config import (
     load_config,
     save_config,
 )
-from detections.linehandler import get_matching_detections, main as run_line_handler, play_sound_file
+from detections.linehandler import explain_detection_match, get_matching_detections, main as run_line_handler, play_sound_file
 
 
 THEMES: dict[str, dict[str, str]] = {
@@ -231,6 +245,271 @@ class WatcherThread(QThread):
         self.stop_event.set()
 
 
+def _normalize_version(version: str) -> tuple[int, ...]:
+    cleaned = version.strip()
+    if cleaned.startswith("v"):
+        cleaned = cleaned[1:]
+    cleaned = cleaned.split("-", 1)[0]
+    parts = []
+    for part in cleaned.split("."):
+        digits = "".join(char for char in part if char.isdigit())
+        if digits == "":
+            parts.append(0)
+        else:
+            parts.append(int(digits))
+    return tuple(parts)
+
+
+def _is_installed_build() -> bool:
+    if not getattr(sys, "frozen", False):
+        return False
+
+    app_dir = APP_DIR.resolve()
+    program_files_roots = [
+        Path(os.environ.get("ProgramFiles", "")),
+        Path(os.environ.get("ProgramFiles(x86)", "")),
+    ]
+    for root in program_files_roots:
+        if not str(root).strip():
+            continue
+        try:
+            if app_dir.is_relative_to(root.resolve()):
+                return True
+        except (OSError, ValueError):
+            continue
+    return False
+
+
+def _is_portable_build() -> bool:
+    return getattr(sys, "frozen", False) and not _is_installed_build()
+
+
+class UpdateCheckThread(QThread):
+    update_ready = Signal(dict)
+    update_failed = Signal(str)
+
+    def run(self) -> None:
+        request = urllib.request.Request(
+            GITHUB_LATEST_RELEASE_API,
+            headers={
+                "Accept": "application/vnd.github+json",
+                "User-Agent": f"{APP_NAME}/{APP_VERSION}",
+            },
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=10) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as error:
+            self.update_failed.emit(f"GitHub returned HTTP {error.code} while checking for updates.")
+            return
+        except urllib.error.URLError as error:
+            self.update_failed.emit(f"Could not reach GitHub: {error.reason}")
+            return
+        except (TimeoutError, json.JSONDecodeError) as error:
+            self.update_failed.emit(f"Could not read release information: {error}")
+            return
+
+        latest_tag = str(payload.get("tag_name", "")).strip()
+        release_name = str(payload.get("name", "")).strip()
+        release_url = str(payload.get("html_url", "")).strip() or GITHUB_RELEASES_URL
+        published_at = str(payload.get("published_at", "")).strip()
+        latest_version = latest_tag[1:] if latest_tag.startswith("v") else latest_tag
+        current_version = APP_VERSION
+        is_newer = _normalize_version(latest_version) > _normalize_version(current_version)
+        assets = payload.get("assets", [])
+        installer_asset = next(
+            (
+                asset
+                for asset in assets
+                if str(asset.get("name", "")).lower().endswith("-setup.msi")
+                or str(asset.get("name", "")).lower().endswith(".msi")
+            ),
+            None,
+        )
+        portable_asset = next(
+            (
+                asset
+                for asset in assets
+                if str(asset.get("name", "")).lower().endswith("-portable-windows.zip")
+                or str(asset.get("name", "")).lower().endswith(".zip")
+            ),
+            None,
+        )
+
+        self.update_ready.emit(
+            {
+                "latest_tag": latest_tag,
+                "latest_version": latest_version,
+                "release_name": release_name,
+                "release_url": release_url,
+                "published_at": published_at,
+                "current_version": current_version,
+                "is_newer": is_newer,
+                "installer_asset_name": str(installer_asset.get("name", "")).strip() if installer_asset else "",
+                "installer_download_url": str(installer_asset.get("browser_download_url", "")).strip() if installer_asset else "",
+                "portable_asset_name": str(portable_asset.get("name", "")).strip() if portable_asset else "",
+                "portable_download_url": str(portable_asset.get("browser_download_url", "")).strip() if portable_asset else "",
+            }
+        )
+
+
+class UpdateDownloadThread(QThread):
+    download_progress = Signal(int, int)
+    download_ready = Signal(str)
+    download_failed = Signal(str)
+
+    def __init__(self, download_url: str, asset_name: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.download_url = download_url
+        self.asset_name = asset_name or "RAGE-Player-Assist-Setup.msi"
+        self._cancel_requested = False
+
+    def cancel(self) -> None:
+        self._cancel_requested = True
+
+    def run(self) -> None:
+        target_dir = Path(tempfile.gettempdir()) / "RAGEPlayerAssistUpdater"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        target_path = target_dir / self.asset_name
+
+        request = urllib.request.Request(
+            self.download_url,
+            headers={
+                "Accept": "application/octet-stream",
+                "User-Agent": f"{APP_NAME}/{APP_VERSION}",
+            },
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                total_bytes = int(response.headers.get("Content-Length", "0") or "0")
+                bytes_read = 0
+                with target_path.open("wb") as handle:
+                    while True:
+                        if self._cancel_requested:
+                            handle.close()
+                            try:
+                                target_path.unlink(missing_ok=True)
+                            except OSError:
+                                pass
+                            self.download_failed.emit("Update download was cancelled.")
+                            return
+                        chunk = response.read(1024 * 256)
+                        if not chunk:
+                            break
+                        handle.write(chunk)
+                        bytes_read += len(chunk)
+                        self.download_progress.emit(bytes_read, total_bytes)
+        except urllib.error.HTTPError as error:
+            self.download_failed.emit(f"GitHub returned HTTP {error.code} while downloading the installer.")
+            return
+        except urllib.error.URLError as error:
+            self.download_failed.emit(f"Could not download the installer: {error.reason}")
+            return
+        except OSError as error:
+            self.download_failed.emit(f"Could not save the installer: {error}")
+            return
+
+        self.download_ready.emit(str(target_path))
+
+
+class ReleaseNotesThread(QThread):
+    release_notes_ready = Signal(list)
+    release_notes_failed = Signal(str)
+
+    def run(self) -> None:
+        request = urllib.request.Request(
+            f"{GITHUB_RELEASES_API}?per_page=8",
+            headers={
+                "Accept": "application/vnd.github+json",
+                "User-Agent": f"{APP_NAME}/{APP_VERSION}",
+            },
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=12) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as error:
+            self.release_notes_failed.emit(f"GitHub returned HTTP {error.code} while loading release notes.")
+            return
+        except urllib.error.URLError as error:
+            self.release_notes_failed.emit(f"Could not reach GitHub: {error.reason}")
+            return
+        except (TimeoutError, json.JSONDecodeError) as error:
+            self.release_notes_failed.emit(f"Could not read release notes: {error}")
+            return
+
+        releases: list[dict[str, str]] = []
+        for item in payload:
+            releases.append(
+                {
+                    "tag_name": str(item.get("tag_name", "")).strip(),
+                    "name": str(item.get("name", "")).strip(),
+                    "published_at": str(item.get("published_at", "")).strip(),
+                    "body": str(item.get("body", "")).strip(),
+                    "html_url": str(item.get("html_url", "")).strip() or GITHUB_RELEASES_URL,
+                }
+            )
+        self.release_notes_ready.emit(releases)
+
+
+def _candidate_storage_roots() -> list[Path]:
+    roots: list[Path] = []
+    seen: set[str] = set()
+
+    env_candidates = [
+        os.environ.get("SystemDrive", ""),
+        os.environ.get("ProgramFiles", ""),
+        os.environ.get("ProgramFiles(x86)", ""),
+    ]
+    for raw_candidate in env_candidates:
+        if not raw_candidate:
+            continue
+        candidate = Path(raw_candidate).resolve()
+        root = Path(candidate.anchor or str(candidate))
+        normalized = str(root).lower()
+        if normalized not in seen:
+            seen.add(normalized)
+            roots.append(root)
+
+    for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
+        root = Path(f"{letter}:\\")
+        if root.exists():
+            normalized = str(root).lower()
+            if normalized not in seen:
+                seen.add(normalized)
+                roots.append(root)
+
+    return roots
+
+
+def discover_storage_paths() -> list[Path]:
+    matches: list[Path] = []
+    seen: set[str] = set()
+    relative_patterns = [
+        Path("RAGEMP") / "client_resources",
+        Path("Games") / "RAGEMP" / "client_resources",
+        Path("Program Files") / "RAGEMP" / "client_resources",
+        Path("Program Files (x86)") / "RAGEMP" / "client_resources",
+    ]
+
+    for root in _candidate_storage_roots():
+        for relative_pattern in relative_patterns:
+            client_resources_dir = root / relative_pattern
+            if not client_resources_dir.exists() or not client_resources_dir.is_dir():
+                continue
+            try:
+                for child in client_resources_dir.iterdir():
+                    storage_path = child / ".storage"
+                    if storage_path.exists() and storage_path.is_file():
+                        normalized = str(storage_path).lower()
+                        if normalized not in seen:
+                            seen.add(normalized)
+                            matches.append(storage_path)
+            except OSError:
+                continue
+
+    return sorted(matches, key=lambda path: str(path).lower())
+
+
 def _create_app_icon() -> QIcon:
     pixmap = QPixmap(64, 64)
     pixmap.fill(Qt.transparent)
@@ -252,6 +531,161 @@ def _create_app_icon() -> QIcon:
     painter.end()
 
     return QIcon(pixmap)
+
+
+def _make_sound_path(filename: str) -> str:
+    return str(RESOURCE_DIR / "sounds" / filename)
+
+
+def _detection_template_definitions() -> list[dict[str, str | float]]:
+    return [
+        {
+            "label": "Private Message",
+            "name": "Private Message",
+            "category": "Messages",
+            "rule_type": "contains",
+            "pattern": "(( pm from (",
+            "sound_path": _make_sound_path("incomingpm.wav"),
+            "log_message": "PM detected line",
+            "cooldown_seconds": 2.0,
+            "description": "Alerts when an incoming private message line appears.",
+        },
+        {
+            "label": "Mention",
+            "name": "Mention",
+            "category": "Messages",
+            "rule_type": "mention",
+            "pattern": "",
+            "sound_path": _make_sound_path("mentioned.wav"),
+            "log_message": "Mention detected line",
+            "cooldown_seconds": 2.0,
+            "description": "Alerts when your configured mention name appears in a chat message.",
+        },
+        {
+            "label": "Keyword Watch",
+            "name": "Keyword Watch",
+            "category": "General",
+            "rule_type": "contains",
+            "pattern": "keyword here",
+            "sound_path": "",
+            "log_message": "Keyword detected",
+            "cooldown_seconds": 1.0,
+            "description": "A generic contains rule you can adapt to server-specific phrases or names.",
+        },
+        {
+            "label": "Regex Pattern",
+            "name": "Regex Pattern",
+            "category": "Advanced",
+            "rule_type": "regex",
+            "pattern": r"\bexample\b",
+            "sound_path": "",
+            "log_message": "Regex pattern detected",
+            "cooldown_seconds": 1.0,
+            "description": "A starter regex rule for power users who need more precise matching.",
+        },
+    ]
+
+
+def _detection_from_template(template: dict[str, str | float]) -> DetectionConfig:
+    return DetectionConfig(
+        id=uuid4().hex,
+        name=str(template["name"]),
+        category=str(template["category"]),
+        rule_type=str(template["rule_type"]),
+        pattern=str(template["pattern"]),
+        enabled=True,
+        sound_path=str(template["sound_path"]),
+        log_message=str(template["log_message"]),
+        cooldown_seconds=float(template["cooldown_seconds"]),
+        volume_percent=100,
+        regex_case_sensitive=False,
+        regex_multiline=False,
+        regex_dotall=False,
+    )
+
+
+class DetectionTemplateDialog(QDialog):
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._templates = _detection_template_definitions()
+        self._selected_template: dict[str, str | float] | None = None
+
+        self.setWindowTitle("Detection Templates")
+        self.resize(760, 480)
+        self.setMinimumSize(680, 420)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(14)
+
+        title = QLabel("Choose a Detection Template")
+        title.setObjectName("dialogTitleLabel")
+        subtitle = QLabel("Start from a common rule and then fine-tune it in the editor.")
+        subtitle.setObjectName("dialogSubtitleLabel")
+        subtitle.setWordWrap(True)
+        layout.addWidget(title)
+        layout.addWidget(subtitle)
+
+        body = QSplitter(Qt.Horizontal)
+        body.setChildrenCollapsible(False)
+        layout.addWidget(body, 1)
+
+        self.template_list = QListWidget()
+        self.template_list.currentRowChanged.connect(self._on_template_selected)
+        body.addWidget(self.template_list)
+
+        detail_panel = QWidget()
+        detail_layout = QFormLayout(detail_panel)
+        detail_layout.setContentsMargins(12, 8, 12, 8)
+        detail_layout.setHorizontalSpacing(12)
+        detail_layout.setVerticalSpacing(10)
+        self.template_name_value = QLabel("Select a template")
+        self.template_name_value.setObjectName("overviewValueBold")
+        self.template_category_value = QLabel("-")
+        self.template_type_value = QLabel("-")
+        self.template_pattern_value = QLabel("-")
+        self.template_sound_value = QLabel("-")
+        self.template_description_value = QLabel("-")
+        self.template_description_value.setWordWrap(True)
+        detail_layout.addRow("Name", self.template_name_value)
+        detail_layout.addRow("Category", self.template_category_value)
+        detail_layout.addRow("Type", self.template_type_value)
+        detail_layout.addRow("Pattern", self.template_pattern_value)
+        detail_layout.addRow("Sound", self.template_sound_value)
+        detail_layout.addRow("Purpose", self.template_description_value)
+        body.addWidget(detail_panel)
+        body.setSizes([260, 420])
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        buttons.button(QDialogButtonBox.Ok).setText("Use Template")
+
+        for template in self._templates:
+            self.template_list.addItem(str(template["label"]))
+        if self._templates:
+            self.template_list.setCurrentRow(0)
+
+    def _on_template_selected(self, row: int) -> None:
+        if row < 0 or row >= len(self._templates):
+            self._selected_template = None
+            return
+
+        template = self._templates[row]
+        self._selected_template = template
+        self.template_name_value.setText(str(template["name"]))
+        self.template_category_value.setText(str(template["category"]))
+        self.template_type_value.setText(str(template["rule_type"]))
+        pattern = str(template["pattern"]) or "(Uses your configured mention name)"
+        self.template_pattern_value.setText(pattern)
+        self.template_sound_value.setText(Path(str(template["sound_path"])).name)
+        self.template_description_value.setText(str(template["description"]))
+
+    def selected_detection(self) -> DetectionConfig | None:
+        if self._selected_template is None:
+            return None
+        return _detection_from_template(self._selected_template)
 
 
 class DetectionEditorDialog(QDialog):
@@ -384,7 +818,17 @@ class DetectionEditorDialog(QDialog):
             self.volume_slider.setValue(value)
 
     def _browse_sound(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "Select Alert Sound", "", "Audio files (*.wav *.mp3);;All files (*.*)")
+        sounds_dir = RESOURCE_DIR / "sounds"
+        initial_directory = sounds_dir if sounds_dir.exists() else Path(self.sound_edit.text().strip() or APP_DIR)
+        if initial_directory.is_file():
+            initial_directory = initial_directory.parent
+
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Alert Sound",
+            str(initial_directory),
+            "Audio files (*.wav *.mp3);;All files (*.*)",
+        )
         if path:
             self.sound_edit.setText(path)
 
@@ -575,7 +1019,9 @@ class TestLineDialog(QDialog):
         layout.setContentsMargins(18, 18, 18, 18)
         layout.setSpacing(14)
 
-        instructions = QLabel("Paste a raw chat line below to see which rules would match. No sounds will play.")
+        instructions = QLabel(
+            "Paste a raw chat line below to see which rules would match and why. No sounds will play."
+        )
         instructions.setWordWrap(True)
         layout.addWidget(instructions)
 
@@ -611,12 +1057,13 @@ class TestLineDialog(QDialog):
             return
 
         matches = get_matching_detections(line, self.config)
-        if not matches:
-            self.results_output.setPlainText("No detections matched this line.")
-            return
+        result_lines = [
+            f"Matched {len(matches)} of {len(self.config.detections)} detection(s).",
+            "",
+        ]
 
-        result_lines = [f"Matched {len(matches)} detection(s):", ""]
-        for detection in matches:
+        for detection in self.config.detections:
+            matched, reason = explain_detection_match(detection, line, self.config.mention_name)
             category_override = next(
                 (item for item in self.config.category_overrides if item.category == detection.category),
                 None,
@@ -627,11 +1074,14 @@ class TestLineDialog(QDialog):
                 if category_override and category_override.use_volume_override
                 else detection.volume_percent
             )
+            result_lines.append(f"[{'MATCH' if matched else 'MISS'}] {detection.name}")
             result_lines.append(f"Name: {detection.name}")
             result_lines.append(f"Category: {detection.category}")
             result_lines.append(f"Type: {detection.rule_type}")
+            result_lines.append(f"Reason: {reason}")
             result_lines.append(f"Sound: {Path(detection.sound_path).name if detection.sound_path else 'None'}")
             result_lines.append(f"Effective audio: {'Muted' if effective_muted else f'{effective_volume}%'}")
+            result_lines.append(f"Enabled: {'Yes' if detection.enabled else 'No'}")
             if detection.rule_type == "regex":
                 flags = []
                 if detection.regex_case_sensitive:
@@ -748,11 +1198,378 @@ class SettingsDialog(QDialog):
         self.log_debug_checkbox.setEnabled(enabled)
 
 
+class ReleaseNotesDialog(QDialog):
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Release Notes")
+        self.resize(760, 560)
+        self.setMinimumSize(680, 460)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(14)
+
+        title = QLabel("Release Notes")
+        title.setObjectName("dialogTitleLabel")
+        subtitle = QLabel("Recent GitHub releases for RAGE Player Assist.")
+        subtitle.setObjectName("dialogSubtitleLabel")
+        subtitle.setWordWrap(True)
+        layout.addWidget(title)
+        layout.addWidget(subtitle)
+
+        self.notes_output = QPlainTextEdit()
+        self.notes_output.setReadOnly(True)
+        self.notes_output.setPlainText("Loading release notes...")
+        layout.addWidget(self.notes_output, 1)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        buttons.rejected.connect(self.reject)
+        buttons.accepted.connect(self.accept)
+        buttons.button(QDialogButtonBox.Close).clicked.connect(self.accept)
+        layout.addWidget(buttons)
+
+    def set_release_notes(self, releases: list[dict[str, str]]) -> None:
+        if not releases:
+            self.notes_output.setPlainText("No GitHub releases were returned.")
+            return
+
+        sections: list[str] = []
+        for release in releases:
+            header = release["tag_name"] or "Untitled release"
+            if release["name"] and release["name"] != release["tag_name"]:
+                header = f"{header} - {release['name']}"
+            body = release["body"] or "No release notes provided."
+            sections.append(
+                "\n".join(
+                    [
+                        header,
+                        f"Published: {release['published_at']}" if release["published_at"] else "",
+                        f"URL: {release['html_url']}",
+                        "",
+                        body,
+                    ]
+                ).strip()
+            )
+
+        self.notes_output.setPlainText(("\n\n" + ("-" * 72) + "\n\n").join(sections))
+        self.notes_output.moveCursor(QTextCursor.Start)
+
+    def set_error(self, message: str) -> None:
+        self.notes_output.setPlainText(message)
+
+
+class FirstRunSetupDialog(QDialog):
+    def __init__(self, config: AppConfig, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.config = config
+        self._pages: list[QWidget] = []
+        self._discovery_results: list[Path] = []
+
+        self.setWindowTitle(f"{APP_NAME} Setup")
+        self.setModal(True)
+        self.resize(640, 420)
+        self.setMinimumSize(600, 380)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(14)
+
+        title = QLabel("First-Time Setup")
+        title.setObjectName("dialogTitleLabel")
+        subtitle = QLabel("Set the basics once so the watcher is ready to use.")
+        subtitle.setObjectName("dialogSubtitleLabel")
+        subtitle.setWordWrap(True)
+        layout.addWidget(title)
+        layout.addWidget(subtitle)
+
+        self.stack = QStackedWidget()
+        layout.addWidget(self.stack, 1)
+
+        self._build_intro_page()
+        self._build_storage_page()
+        self._build_detection_page()
+        self._build_finish_page()
+
+        self.message_label = QLabel("")
+        self.message_label.setObjectName("hintLabel")
+        self.message_label.setWordWrap(True)
+        layout.addWidget(self.message_label)
+
+        button_row = QHBoxLayout()
+        button_row.addStretch(1)
+        self.back_button = QPushButton("Back")
+        self.back_button.clicked.connect(self._go_back)
+        self.next_button = QPushButton("Next")
+        self.next_button.clicked.connect(self._go_next)
+        self.finish_button = QPushButton("Save and Finish")
+        self.finish_button.clicked.connect(self._finish)
+        cancel_button = QPushButton("Cancel")
+        cancel_button.clicked.connect(self.reject)
+        button_row.addWidget(self.back_button)
+        button_row.addWidget(self.next_button)
+        button_row.addWidget(self.finish_button)
+        button_row.addWidget(cancel_button)
+        layout.addLayout(button_row)
+
+        self.storage_path_edit.setText(self.config.storage_path)
+        self.mention_name_edit.setText(self.config.mention_name)
+        self._refresh_finish_summary()
+        self._refresh_buttons()
+
+    def _add_page(self, page: QWidget) -> None:
+        self._pages.append(page)
+        self.stack.addWidget(page)
+
+    def _build_intro_page(self) -> None:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setSpacing(12)
+
+        intro = QLabel(
+            "RAGE Player Assist watches your RageMP .storage file, matches detection rules, and plays alerts "
+            "for the lines you care about."
+        )
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        bullets = QLabel(
+            "This setup will help you:\n"
+            "• choose the storage file to monitor\n"
+            "• set the mention name used by the default mention rule\n"
+            "• review the default detections that ship with the app"
+        )
+        bullets.setWordWrap(True)
+        layout.addWidget(bullets)
+
+        note = QLabel(
+            "You can change any of this later from the main window. If you cancel, the app will still open, "
+            "but the watcher will not be ready to start."
+        )
+        note.setObjectName("hintLabel")
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        layout.addStretch(1)
+        self._add_page(page)
+
+    def _build_storage_page(self) -> None:
+        page = QWidget()
+        layout = QFormLayout(page)
+        layout.setHorizontalSpacing(12)
+        layout.setVerticalSpacing(12)
+
+        storage_widget = QWidget()
+        storage_row = QHBoxLayout(storage_widget)
+        storage_row.setContentsMargins(0, 0, 0, 0)
+        storage_row.setSpacing(8)
+        self.storage_path_edit = QLineEdit()
+        self.storage_path_edit.setPlaceholderText(r"Example: E:\RAGEMP\client_resources\...\ .storage")
+        self.storage_path_edit.textChanged.connect(self._refresh_finish_summary)
+        browse_button = QPushButton("Browse")
+        browse_button.clicked.connect(self._browse_storage)
+        auto_detect_button = QPushButton("Auto-Detect")
+        auto_detect_button.clicked.connect(self._auto_detect_storage)
+        storage_row.addWidget(self.storage_path_edit, 1)
+        storage_row.addWidget(auto_detect_button)
+        storage_row.addWidget(browse_button)
+
+        self.mention_name_edit = QLineEdit()
+        self.mention_name_edit.setPlaceholderText("Enter your in-game name")
+        self.mention_name_edit.textChanged.connect(self._refresh_finish_summary)
+
+        storage_hint = QLabel(
+            "Pick the RageMP .storage file that receives new chat lines. Use Auto-Detect to scan common RageMP install "
+            "locations across available drives."
+        )
+        storage_hint.setObjectName("hintLabel")
+        storage_hint.setWordWrap(True)
+
+        mention_hint = QLabel(
+            "The default Mention rule uses this name. Leave it blank only if you plan to disable mention-based detections."
+        )
+        mention_hint.setObjectName("hintLabel")
+        mention_hint.setWordWrap(True)
+
+        layout.addRow("Storage file", storage_widget)
+        layout.addRow("", storage_hint)
+        layout.addRow("Mention name", self.mention_name_edit)
+        layout.addRow("", mention_hint)
+        self._add_page(page)
+
+    def _build_detection_page(self) -> None:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setSpacing(10)
+
+        heading = QLabel("Default Detections")
+        heading.setObjectName("overviewValueBold")
+        layout.addWidget(heading)
+
+        info = QLabel(
+            "The app starts with two default detections so it is immediately useful. You can edit or remove them later."
+        )
+        info.setWordWrap(True)
+        layout.addWidget(info)
+
+        self.default_detection_list = QListWidget()
+        self.default_detection_list.setEnabled(False)
+        for detection in self.config.detections:
+            self.default_detection_list.addItem(
+                f"{detection.name}  •  {detection.category}  •  {detection.rule_type}"
+            )
+        layout.addWidget(self.default_detection_list, 1)
+
+        hint = QLabel(
+            "Tip: the bundled sound browser now opens in the packaged sounds folder, so you can quickly pick a built-in alert "
+            "or drag in your own file from another Explorer window."
+        )
+        hint.setObjectName("hintLabel")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        self._add_page(page)
+
+    def _build_finish_page(self) -> None:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setSpacing(10)
+
+        summary_title = QLabel("Ready to Finish")
+        summary_title.setObjectName("overviewValueBold")
+        layout.addWidget(summary_title)
+
+        self.summary_label = QLabel("")
+        self.summary_label.setWordWrap(True)
+        layout.addWidget(self.summary_label)
+
+        finish_hint = QLabel(
+            "Saving now writes the standard config file used by the rest of the application. After setup, you can start the "
+            "watcher immediately from the main window."
+        )
+        finish_hint.setObjectName("hintLabel")
+        finish_hint.setWordWrap(True)
+        layout.addWidget(finish_hint)
+        layout.addStretch(1)
+        self._add_page(page)
+
+    def _browse_storage(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select RageMP .storage File",
+            self.storage_path_edit.text().strip(),
+            "Storage files (*.storage);;All files (*.*)",
+        )
+        if path:
+            self.storage_path_edit.setText(path)
+
+    def _auto_detect_storage(self) -> None:
+        matches = discover_storage_paths()
+        self._discovery_results = matches
+        if not matches:
+            self.message_label.setText(
+                "No .storage file was found in the common RageMP install paths that were checked. You can still browse manually."
+            )
+            return
+
+        if len(matches) == 1:
+            self.storage_path_edit.setText(str(matches[0]))
+            self.message_label.setText(f"Auto-detected storage file: {matches[0]}")
+            return
+
+        options = [str(path) for path in matches]
+        selection, accepted = QInputDialog.getItem(
+            self,
+            "Choose Auto-Detected Storage File",
+            "Multiple RageMP storage files were found:",
+            options,
+            0,
+            False,
+        )
+        if accepted and selection:
+            self.storage_path_edit.setText(selection)
+            self.message_label.setText(f"Auto-detected storage file selected: {selection}")
+
+    def _go_back(self) -> None:
+        self.stack.setCurrentIndex(max(0, self.stack.currentIndex() - 1))
+        self._refresh_buttons()
+
+    def _go_next(self) -> None:
+        if not self._validate_current_page():
+            return
+        self.stack.setCurrentIndex(min(self.stack.count() - 1, self.stack.currentIndex() + 1))
+        self._refresh_buttons()
+
+    def _refresh_buttons(self) -> None:
+        last_index = self.stack.count() - 1
+        current_index = self.stack.currentIndex()
+        self.back_button.setEnabled(current_index > 0)
+        self.next_button.setVisible(current_index < last_index)
+        self.finish_button.setVisible(current_index == last_index)
+        self.message_label.setText("")
+
+    def _refresh_finish_summary(self) -> None:
+        storage_text = self.storage_path_edit.text().strip() or "Not set yet"
+        mention_text = self.mention_name_edit.text().strip() or "Blank"
+        self.summary_label.setText(
+            "\n".join(
+                [
+                    f"Storage file: {storage_text}",
+                    f"Mention name: {mention_text}",
+                    f"Default detections: {len(self.config.detections)}",
+                ]
+            )
+        )
+
+    def _validate_current_page(self) -> bool:
+        if self.stack.currentIndex() != 1:
+            return True
+
+        storage_path = self.storage_path_edit.text().strip()
+        if not storage_path:
+            self.message_label.setText("Choose the RageMP .storage file before continuing.")
+            return False
+
+        storage_file = Path(storage_path)
+        if not storage_file.exists():
+            self.message_label.setText(f"Storage path does not exist: {storage_file}")
+            return False
+        if not storage_file.is_file():
+            self.message_label.setText(f"Storage path is not a file: {storage_file}")
+            return False
+
+        mention_name = self.mention_name_edit.text().strip()
+        mention_required = any(d.rule_type == "mention" and d.enabled for d in self.config.detections)
+        if mention_required and not mention_name:
+            self.message_label.setText("Enter your mention name or disable mention detections later from the main window.")
+            return False
+
+        return True
+
+    def _finish(self) -> None:
+        if not self._validate_current_page() and self.stack.currentIndex() == 1:
+            return
+        if self.stack.currentIndex() != self.stack.count() - 1:
+            if not self._validate_current_page():
+                return
+            self.stack.setCurrentIndex(self.stack.count() - 1)
+            self._refresh_buttons()
+            return
+
+        self.config.storage_path = self.storage_path_edit.text().strip()
+        self.config.mention_name = self.mention_name_edit.text().strip()
+        save_config(self.config)
+        self.accept()
+
+
 class PlayerAssistWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
+        self._config_exists_on_launch = CONFIG_FILE.exists()
         self.config = load_config()
         self.worker_thread: WatcherThread | None = None
+        self.update_check_thread: UpdateCheckThread | None = None
+        self.update_download_thread: UpdateDownloadThread | None = None
+        self.update_progress_dialog: QProgressDialog | None = None
+        self._silent_update_check = False
+        self.release_notes_thread: ReleaseNotesThread | None = None
         self.selected_detection_id: str | None = None
         self.filtered_detection_ids: list[str] = []
         self.app_icon = _create_app_icon()
@@ -769,9 +1586,12 @@ class PlayerAssistWindow(QMainWindow):
         self._connect_dirty_signals()
         self._populate_detection_list()
         self._refresh_window_title()
+        self._run_first_time_setup_if_needed()
         self._append_log("GUI ready.")
         self._log_startup_validation()
-        if self.config.start_watcher_on_launch:
+        if getattr(sys, "frozen", False):
+            self.check_for_updates(silent=True)
+        if self.config.start_watcher_on_launch and not self._needs_first_time_setup():
             self._append_log("Start watcher on launch is enabled.")
             self.start()
 
@@ -921,11 +1741,17 @@ class PlayerAssistWindow(QMainWindow):
         detection_buttons.setSpacing(6)
         add_button = QPushButton("Add")
         add_button.clicked.connect(self._add_detection)
+        template_button = QPushButton("Template")
+        template_button.clicked.connect(self._add_detection_from_template)
+        duplicate_button = QPushButton("Duplicate")
+        duplicate_button.clicked.connect(self._duplicate_selected_detection)
         edit_button = QPushButton("Edit")
         edit_button.clicked.connect(self._edit_selected_detection)
         remove_button = QPushButton("Remove")
         remove_button.clicked.connect(self._remove_detection)
         detection_buttons.addWidget(add_button)
+        detection_buttons.addWidget(template_button)
+        detection_buttons.addWidget(duplicate_button)
         detection_buttons.addWidget(edit_button)
         detection_buttons.addWidget(remove_button)
         detection_buttons.addStretch(1)
@@ -994,7 +1820,9 @@ class PlayerAssistWindow(QMainWindow):
         tools_menu = menu_bar.addMenu("&Tools")
         tools_menu.addAction("Test Line\u2026", self.open_test_line_dialog)
         tools_menu.addAction("Category Audio\u2026", self._open_category_overrides)
+        tools_menu.addAction("Check for Updates\u2026", self.check_for_updates)
         help_menu = menu_bar.addMenu("&Help")
+        help_menu.addAction("Release Notes\u2026", self.open_release_notes_dialog)
         help_menu.addAction("About", self.open_about_dialog)
 
     def _apply_styles(self) -> None:
@@ -1210,6 +2038,33 @@ class PlayerAssistWindow(QMainWindow):
         """.format(**theme)
         self.setStyleSheet(stylesheet)
 
+    def _needs_first_time_setup(self) -> bool:
+        if not self.config.storage_path.strip():
+            return True
+
+        mention_required = any(d.rule_type == "mention" and d.enabled for d in self.config.detections)
+        return mention_required and not self.config.mention_name.strip()
+
+    def _run_first_time_setup_if_needed(self) -> None:
+        if not self._needs_first_time_setup():
+            return
+
+        if self._config_exists_on_launch:
+            self._append_log("Configuration is incomplete. Opening setup wizard.")
+        else:
+            self._append_log("No existing configuration found. Opening first-time setup wizard.")
+
+        dialog = FirstRunSetupDialog(self.config, self)
+        if dialog.exec() != QDialog.Accepted:
+            self._append_log("Setup wizard was dismissed before completion.")
+            return
+
+        self.config = load_config()
+        self._load_config_into_form()
+        self._populate_detection_list()
+        self._apply_styles()
+        self._append_log("First-time setup complete.")
+
     def _load_config_into_form(self) -> None:
         self.storage_path_edit.setText(self.config.storage_path)
         self.mention_name_edit.setText(self.config.mention_name)
@@ -1423,6 +2278,56 @@ class PlayerAssistWindow(QMainWindow):
         self._mark_dirty()
         self._append_log(f"Added detection: {updated.name}")
 
+    def _add_detection_from_template(self) -> None:
+        dialog = DetectionTemplateDialog(self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        draft = dialog.selected_detection()
+        if draft is None:
+            self._append_log("No template selected.")
+            return
+
+        updated = self._open_detection_editor(draft)
+        if updated is None:
+            return
+        self.config.detections.append(updated)
+        self.selected_detection_id = updated.id
+        self._populate_detection_list()
+        self._mark_dirty()
+        self._append_log(f"Added detection from template: {updated.name}")
+
+    def _duplicate_selected_detection(self) -> None:
+        detection = self._current_detection()
+        if detection is None:
+            self._append_log("Select a detection first.")
+            return
+
+        duplicate = DetectionConfig(
+            id=uuid4().hex,
+            name=f"{detection.name} Copy",
+            category=detection.category,
+            rule_type=detection.rule_type,
+            pattern=detection.pattern,
+            enabled=detection.enabled,
+            sound_path=detection.sound_path,
+            log_message=detection.log_message,
+            cooldown_seconds=detection.cooldown_seconds,
+            volume_percent=detection.volume_percent,
+            regex_case_sensitive=detection.regex_case_sensitive,
+            regex_multiline=detection.regex_multiline,
+            regex_dotall=detection.regex_dotall,
+        )
+        updated = self._open_detection_editor(duplicate)
+        if updated is None:
+            return
+
+        self.config.detections.append(updated)
+        self.selected_detection_id = updated.id
+        self._populate_detection_list()
+        self._mark_dirty()
+        self._append_log(f"Duplicated detection: {detection.name} -> {updated.name}")
+
     def _edit_selected_detection(self) -> None:
         detection = self._current_detection()
         if detection is None:
@@ -1533,6 +2438,292 @@ class PlayerAssistWindow(QMainWindow):
     def open_test_line_dialog(self) -> None:
         dialog = TestLineDialog(self.config, self)
         dialog.exec()
+
+    def check_for_updates(self, silent: bool = False) -> None:
+        if self.update_check_thread is not None and self.update_check_thread.isRunning():
+            if not silent:
+                self._append_log("Update check is already running.")
+            return
+
+        self._silent_update_check = silent
+        if silent:
+            self._append_log("Checking for updates in the background...")
+        else:
+            self._append_log("Checking GitHub releases for updates...")
+        self.update_check_thread = UpdateCheckThread(self)
+        self.update_check_thread.update_ready.connect(self._on_update_check_ready)
+        self.update_check_thread.update_failed.connect(self._on_update_check_failed)
+        self.update_check_thread.finished.connect(self._on_update_check_finished)
+        self.update_check_thread.start()
+
+    def _on_update_check_ready(self, payload: dict) -> None:
+        current_version = str(payload.get("current_version", APP_VERSION))
+        latest_tag = str(payload.get("latest_tag", "") or "Unknown")
+        latest_version = str(payload.get("latest_version", "") or "Unknown")
+        release_name = str(payload.get("release_name", "")).strip()
+        published_at = str(payload.get("published_at", "")).strip()
+        release_url = str(payload.get("release_url", GITHUB_RELEASES_URL))
+        installer_download_url = str(payload.get("installer_download_url", "")).strip()
+        installer_asset_name = str(payload.get("installer_asset_name", "")).strip()
+        portable_download_url = str(payload.get("portable_download_url", "")).strip()
+        portable_asset_name = str(payload.get("portable_asset_name", "")).strip()
+
+        if bool(payload.get("is_newer")):
+            self._append_log(f"Update available: v{current_version} -> {latest_tag}")
+            if _is_installed_build() and installer_download_url:
+                message = "\n".join(
+                    line
+                    for line in [
+                        f"You are running v{current_version}.",
+                        f"The latest release is {latest_tag}.",
+                        f"Release name: {release_name}" if release_name else "",
+                        f"Published: {published_at}" if published_at else "",
+                        "",
+                        "Download and install the update now?",
+                    ]
+                    if line != ""
+                )
+                choice = QMessageBox.question(
+                    self,
+                    "Update Available",
+                    message,
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.Yes if not self._silent_update_check else QMessageBox.No,
+                )
+                if choice == QMessageBox.Yes:
+                    self._download_and_install_update(installer_download_url, installer_asset_name or f"{latest_tag}-setup.msi")
+                return
+            if _is_portable_build() and portable_download_url:
+                message = "\n".join(
+                    line
+                    for line in [
+                        f"You are running v{current_version}.",
+                        f"The latest release is {latest_tag}.",
+                        f"Release name: {release_name}" if release_name else "",
+                        f"Published: {published_at}" if published_at else "",
+                        "",
+                        "Download and update the portable build now?",
+                    ]
+                    if line != ""
+                )
+                choice = QMessageBox.question(
+                    self,
+                    "Update Available",
+                    message,
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.Yes if not self._silent_update_check else QMessageBox.No,
+                )
+                if choice == QMessageBox.Yes:
+                    self._download_and_install_update(portable_download_url, portable_asset_name or f"{latest_tag}-portable.zip")
+                return
+
+            message = "\n".join(
+                line
+                for line in [
+                    f"You are running v{current_version}.",
+                    f"The latest release is {latest_tag}.",
+                    f"Release name: {release_name}" if release_name else "",
+                    f"Published: {published_at}" if published_at else "",
+                    "",
+                    "Open the GitHub Releases page now?",
+                ]
+                if line != ""
+            )
+            choice = QMessageBox.question(
+                self,
+                "Update Available",
+                message,
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes,
+            )
+            if choice == QMessageBox.Yes:
+                webbrowser.open(release_url)
+            return
+
+        self._append_log(f"No update available. Current version v{current_version} is up to date.")
+        if not self._silent_update_check:
+            QMessageBox.information(
+                self,
+                "No Update Available",
+                "\n".join(
+                    line
+                    for line in [
+                        f"You are running v{current_version}.",
+                        f"The latest GitHub release is {latest_tag or latest_version}.",
+                        f"Release name: {release_name}" if release_name else "",
+                        f"Published: {published_at}" if published_at else "",
+                    ]
+                    if line != ""
+                ),
+            )
+
+    def _on_update_check_failed(self, message: str) -> None:
+        self._append_log(f"Update check failed: {message}")
+        if not self._silent_update_check:
+            QMessageBox.warning(self, "Update Check Failed", message)
+
+    def _on_update_check_finished(self) -> None:
+        self._silent_update_check = False
+        self.update_check_thread = None
+
+    def _download_and_install_update(self, download_url: str, asset_name: str) -> None:
+        if self.update_download_thread is not None and self.update_download_thread.isRunning():
+            self._append_log("Update download is already running.")
+            return
+
+        self.update_progress_dialog = QProgressDialog("Downloading update installer...", "Cancel", 0, 100, self)
+        self.update_progress_dialog.setWindowTitle("Downloading Update")
+        self.update_progress_dialog.setAutoClose(False)
+        self.update_progress_dialog.setAutoReset(False)
+        self.update_progress_dialog.setMinimumDuration(0)
+        self.update_progress_dialog.canceled.connect(self._cancel_update_download)
+        self.update_progress_dialog.show()
+
+        self.update_download_thread = UpdateDownloadThread(download_url, asset_name, self)
+        self.update_download_thread.download_progress.connect(self._on_update_download_progress)
+        self.update_download_thread.download_ready.connect(self._on_update_download_ready)
+        self.update_download_thread.download_failed.connect(self._on_update_download_failed)
+        self.update_download_thread.finished.connect(self._on_update_download_finished)
+        self.update_download_thread.start()
+        self._append_log(f"Downloading update installer: {asset_name}")
+
+    def _cancel_update_download(self) -> None:
+        if self.update_download_thread is None:
+            return
+        self.update_download_thread.cancel()
+        self._append_log("Update download cancellation requested.")
+
+    def _on_update_download_progress(self, bytes_read: int, total_bytes: int) -> None:
+        if self.update_progress_dialog is None:
+            return
+        if total_bytes > 0:
+            progress = max(0, min(100, int((bytes_read / total_bytes) * 100)))
+            self.update_progress_dialog.setMaximum(100)
+            self.update_progress_dialog.setValue(progress)
+            self.update_progress_dialog.setLabelText(f"Downloading update installer... {progress}%")
+        else:
+            self.update_progress_dialog.setMaximum(0)
+            self.update_progress_dialog.setLabelText("Downloading update installer...")
+
+    def _on_update_download_ready(self, installer_path: str) -> None:
+        self._append_log(f"Update downloaded: {installer_path}")
+        if self.update_progress_dialog is not None:
+            self.update_progress_dialog.close()
+            self.update_progress_dialog = None
+
+        if installer_path.lower().endswith(".zip") and _is_portable_build():
+            self._launch_portable_updater(installer_path)
+            return
+
+        try:
+            subprocess.Popen(["msiexec.exe", "/i", installer_path], close_fds=True)
+        except OSError as error:
+            QMessageBox.warning(self, "Update Launch Failed", f"Could not launch the Windows installer: {error}")
+            return
+
+        QMessageBox.information(
+            self,
+            "Installer Launched",
+            "The update installer has been launched. The app will now close so Windows Installer can continue.",
+        )
+        self.exit_app()
+
+    def _on_update_download_failed(self, message: str) -> None:
+        self._append_log(f"Update download failed: {message}")
+        if self.update_progress_dialog is not None:
+            self.update_progress_dialog.close()
+            self.update_progress_dialog = None
+        QMessageBox.warning(self, "Update Download Failed", message)
+
+    def _on_update_download_finished(self) -> None:
+        self.update_download_thread = None
+
+    def _launch_portable_updater(self, archive_path: str) -> None:
+        archive = Path(archive_path)
+        updater_dir = archive.parent
+        extract_dir = updater_dir / "portable_update_extract"
+        script_path = updater_dir / "apply_portable_update.ps1"
+        exe_path = Path(sys.executable).resolve()
+        app_dir = APP_DIR.resolve()
+
+        script_contents = f"""$ErrorActionPreference = "Stop"
+$archivePath = "{archive}"
+$extractDir = "{extract_dir}"
+$appDir = "{app_dir}"
+$exePath = "{exe_path}"
+$processId = {os.getpid()}
+
+try {{
+    Wait-Process -Id $processId
+}} catch {{
+}}
+
+if (Test-Path $extractDir) {{
+    Remove-Item -Recurse -Force $extractDir
+}}
+
+Expand-Archive -Path $archivePath -DestinationPath $extractDir -Force
+Copy-Item (Join-Path $extractDir "RAGE Player Assist.exe") (Join-Path $appDir "RAGE Player Assist.exe") -Force
+
+$internalSource = Join-Path $extractDir "_internal"
+$internalTarget = Join-Path $appDir "_internal"
+if (Test-Path $internalTarget) {{
+    Remove-Item -Recurse -Force $internalTarget
+}}
+Copy-Item $internalSource $internalTarget -Recurse -Force
+
+Start-Process -FilePath $exePath
+"""
+        script_path.write_text(script_contents, encoding="utf-8")
+
+        try:
+            subprocess.Popen(
+                [
+                    "powershell.exe",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-WindowStyle",
+                    "Hidden",
+                    "-File",
+                    str(script_path),
+                ],
+                close_fds=True,
+            )
+        except OSError as error:
+            QMessageBox.warning(self, "Portable Update Failed", f"Could not launch the portable updater: {error}")
+            return
+
+        QMessageBox.information(
+            self,
+            "Portable Update Ready",
+            "The portable update has been downloaded. The app will now close, apply the update, and relaunch.",
+        )
+        self.exit_app()
+
+    def open_release_notes_dialog(self) -> None:
+        dialog = ReleaseNotesDialog(self)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+        if self.release_notes_thread is not None and self.release_notes_thread.isRunning():
+            dialog.set_error("Release notes are already being loaded. Please wait for the current request to finish.")
+            dialog.exec()
+            return
+
+        self._append_log("Loading GitHub release notes...")
+        self.release_notes_thread = ReleaseNotesThread(self)
+        self.release_notes_thread.release_notes_ready.connect(dialog.set_release_notes)
+        self.release_notes_thread.release_notes_failed.connect(dialog.set_error)
+        self.release_notes_thread.release_notes_failed.connect(
+            lambda message: self._append_log(f"Release notes load failed: {message}")
+        )
+        self.release_notes_thread.finished.connect(self._on_release_notes_finished)
+        self.release_notes_thread.start()
+        dialog.exec()
+
+    def _on_release_notes_finished(self) -> None:
+        self.release_notes_thread = None
 
     def open_settings_dialog(self) -> None:
         dialog = SettingsDialog(self.config, self)

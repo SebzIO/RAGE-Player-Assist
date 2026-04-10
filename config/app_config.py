@@ -33,7 +33,12 @@ RESOURCE_DIR = _resource_base_dir()
 CONFIG_FILE = APP_DIR / "app_config.json"
 DEFAULT_STORAGE_PATH = ""
 APP_NAME = "RAGE Player Assist"
-SOURCE_APP_VERSION = "1.0.2"
+SOURCE_APP_VERSION = "1.0.3"
+GITHUB_OWNER = "SebzIO"
+GITHUB_REPO = "AdminAssist"
+GITHUB_RELEASES_URL = f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}/releases"
+GITHUB_LATEST_RELEASE_API = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/releases/latest"
+GITHUB_RELEASES_API = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/releases"
 
 
 def _load_build_metadata() -> dict[str, str]:

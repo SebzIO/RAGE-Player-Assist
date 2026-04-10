@@ -1,0 +1,19 @@
+<Project Sdk="WixToolset.Sdk/6.0.2">
+  <PropertyGroup>
+    <OutputType>Package</OutputType>
+    <InstallerPlatform>x64</InstallerPlatform>
+    <OutputName>RAGE-Player-Assist-Setup</OutputName>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <SuppressIces>ICE60;ICE69</SuppressIces>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="WixToolset.UI.wixext" Version="6.0.2" />
+    <PackageReference Include="WixToolset.Util.wixext" Version="6.0.2" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="Product.Generated.wxs" />
+    <Compile Include="GeneratedFiles.wxs" />
+  </ItemGroup>
+</Project>

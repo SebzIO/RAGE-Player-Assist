@@ -20,6 +20,7 @@
     </StandardDirectory>
 
     <ui:WixUI Id="WixUI_Minimal" />
+    <WixVariable Id="WixUILicenseRtf" Value="License.rtf" />
     <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Launch RAGE Player Assist" />
     <Property Id="WixShellExecTarget" Value="[#MAINEXEFILE]" />
     <CustomAction Id="LaunchApplication" BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)" DllEntry="WixShellExec" Impersonate="yes" />

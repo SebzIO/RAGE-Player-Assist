@@ -2645,6 +2645,7 @@ class PlayerAssistWindow(QMainWindow):
         updater_dir = archive.parent
         extract_dir = updater_dir / "portable_update_extract"
         script_path = updater_dir / "apply_portable_update.ps1"
+        log_path = updater_dir / "portable_update.log"
         exe_path = Path(sys.executable).resolve()
         app_dir = INSTALL_DIR.resolve()
 
@@ -2653,28 +2654,100 @@ $archivePath = "{archive}"
 $extractDir = "{extract_dir}"
 $appDir = "{app_dir}"
 $exePath = "{exe_path}"
+$logPath = "{log_path}"
 $processId = {os.getpid()}
 
+$timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+"[$timestamp] Portable update started." | Out-File -FilePath $logPath -Encoding utf8
+
+function Write-Log {{
+    param([string]$Message)
+    $entry = "[{{0}}] {{1}}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $Message
+    $entry | Out-File -FilePath $logPath -Encoding utf8 -Append
+}}
+
+function Invoke-WithRetry {{
+    param(
+        [scriptblock]$Action,
+        [string]$Description,
+        [int]$Attempts = 12,
+        [int]$DelayMs = 1000
+    )
+
+    for ($attempt = 1; $attempt -le $Attempts; $attempt++) {{
+        try {{
+            & $Action
+            Write-Log "$Description succeeded on attempt $attempt."
+            return
+        }} catch {{
+            if ($attempt -eq $Attempts) {{
+                throw
+            }}
+            Write-Log "$Description failed on attempt $attempt: $($_.Exception.Message)"
+            Start-Sleep -Milliseconds $DelayMs
+        }}
+    }}
+}}
+
 try {{
-    Wait-Process -Id $processId
+    try {{
+        Wait-Process -Id $processId
+        Write-Log "Original app process exited."
+    }} catch {{
+        Write-Log "Original app process was already gone."
+    }}
+
+    Start-Sleep -Seconds 2
+
+    if (Test-Path $extractDir) {{
+        Invoke-WithRetry -Description "Removing old extract directory" -Action {{
+            Remove-Item -Recurse -Force $extractDir
+        }}
+    }}
+
+    Invoke-WithRetry -Description "Expanding portable update archive" -Action {{
+        Expand-Archive -Path $archivePath -DestinationPath $extractDir -Force
+    }}
+
+    $newExe = Join-Path $extractDir "RAGE Player Assist.exe"
+    $targetExe = Join-Path $appDir "RAGE Player Assist.exe"
+    Invoke-WithRetry -Description "Replacing main executable" -Action {{
+        Copy-Item $newExe $targetExe -Force
+    }}
+
+    $internalSource = Join-Path $extractDir "_internal"
+    $internalTarget = Join-Path $appDir "_internal"
+    $backupInternal = Join-Path $appDir "_internal.old"
+
+    if (Test-Path $backupInternal) {{
+        Invoke-WithRetry -Description "Removing previous internal backup" -Action {{
+            Remove-Item -Recurse -Force $backupInternal
+        }}
+    }}
+
+    if (Test-Path $internalTarget) {{
+        Invoke-WithRetry -Description "Backing up existing internal folder" -Action {{
+            Rename-Item $internalTarget $backupInternal
+        }}
+    }}
+
+    Invoke-WithRetry -Description "Copying new internal folder" -Action {{
+        Copy-Item $internalSource $internalTarget -Recurse -Force
+    }}
+
+    if (Test-Path $backupInternal) {{
+        Invoke-WithRetry -Description "Removing internal backup" -Action {{
+            Remove-Item -Recurse -Force $backupInternal
+        }}
+    }}
+
+    Write-Log "Launching updated application."
+    Start-Process -FilePath $targetExe
 }} catch {{
+    Write-Log "Portable update failed: $($_.Exception.Message)"
+    Start-Process notepad.exe $logPath
+    throw
 }}
-
-if (Test-Path $extractDir) {{
-    Remove-Item -Recurse -Force $extractDir
-}}
-
-Expand-Archive -Path $archivePath -DestinationPath $extractDir -Force
-Copy-Item (Join-Path $extractDir "RAGE Player Assist.exe") (Join-Path $appDir "RAGE Player Assist.exe") -Force
-
-$internalSource = Join-Path $extractDir "_internal"
-$internalTarget = Join-Path $appDir "_internal"
-if (Test-Path $internalTarget) {{
-    Remove-Item -Recurse -Force $internalTarget
-}}
-Copy-Item $internalSource $internalTarget -Recurse -Force
-
-Start-Process -FilePath $exePath
 """
         script_path.write_text(script_contents, encoding="utf-8")
 

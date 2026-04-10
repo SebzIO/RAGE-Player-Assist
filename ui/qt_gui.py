@@ -55,6 +55,7 @@ from config.app_config import (
     APP_VERSION,
     CONFIG_FILE,
     APP_DIR,
+    INSTALL_DIR,
     GITHUB_RELEASES_API,
     GITHUB_LATEST_RELEASE_API,
     GITHUB_RELEASES_URL,
@@ -264,7 +265,7 @@ def _is_installed_build() -> bool:
     if not getattr(sys, "frozen", False):
         return False
 
-    app_dir = APP_DIR.resolve()
+    app_dir = INSTALL_DIR.resolve()
     program_files_roots = [
         Path(os.environ.get("ProgramFiles", "")),
         Path(os.environ.get("ProgramFiles(x86)", "")),
@@ -819,7 +820,7 @@ class DetectionEditorDialog(QDialog):
 
     def _browse_sound(self) -> None:
         sounds_dir = RESOURCE_DIR / "sounds"
-        initial_directory = sounds_dir if sounds_dir.exists() else Path(self.sound_edit.text().strip() or APP_DIR)
+        initial_directory = sounds_dir if sounds_dir.exists() else Path(self.sound_edit.text().strip() or INSTALL_DIR)
         if initial_directory.is_file():
             initial_directory = initial_directory.parent
 
@@ -2415,6 +2416,7 @@ class PlayerAssistWindow(QMainWindow):
         except (OSError, json.JSONDecodeError) as error:
             self._append_log(f"Failed to read import file: {error}")
             return
+        CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
         CONFIG_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
         imported = load_config()
         self.config = imported
@@ -2644,7 +2646,7 @@ class PlayerAssistWindow(QMainWindow):
         extract_dir = updater_dir / "portable_update_extract"
         script_path = updater_dir / "apply_portable_update.ps1"
         exe_path = Path(sys.executable).resolve()
-        app_dir = APP_DIR.resolve()
+        app_dir = INSTALL_DIR.resolve()
 
         script_contents = f"""$ErrorActionPreference = "Stop"
 $archivePath = "{archive}"

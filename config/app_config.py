@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
@@ -13,6 +14,31 @@ def _app_base_dir() -> Path:
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent
     return Path(__file__).resolve().parent.parent
+
+
+def _is_installed_build() -> bool:
+    if not getattr(sys, "frozen", False):
+        return False
+
+    app_dir = _app_base_dir()
+    for env_name in ("ProgramFiles", "ProgramFiles(x86)"):
+        raw_root = os.environ.get(env_name, "").strip()
+        if not raw_root:
+            continue
+        try:
+            if app_dir.is_relative_to(Path(raw_root).resolve()):
+                return True
+        except (OSError, ValueError):
+            continue
+    return False
+
+
+def _data_base_dir() -> Path:
+    if _is_installed_build():
+        local_app_data = os.environ.get("LOCALAPPDATA", "").strip()
+        if local_app_data:
+            return Path(local_app_data).resolve() / "RAGE Player Assist"
+    return _app_base_dir()
 
 
 def _resource_base_dir() -> Path:
@@ -28,12 +54,13 @@ def _resource_base_dir() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
-APP_DIR = _app_base_dir()
+APP_DIR = _data_base_dir()
+INSTALL_DIR = _app_base_dir()
 RESOURCE_DIR = _resource_base_dir()
 CONFIG_FILE = APP_DIR / "app_config.json"
 DEFAULT_STORAGE_PATH = ""
 APP_NAME = "RAGE Player Assist"
-SOURCE_APP_VERSION = "1.0.3"
+SOURCE_APP_VERSION = "1.0.4"
 GITHUB_OWNER = "SebzIO"
 GITHUB_REPO = "AdminAssist"
 GITHUB_RELEASES_URL = f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}/releases"
@@ -220,6 +247,7 @@ def load_config(config_path: Path = CONFIG_FILE) -> AppConfig:
 
 def save_config(config: AppConfig, config_path: Path = CONFIG_FILE) -> None:
     payload = asdict(config)
+    config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
@@ -250,7 +278,7 @@ def _resolve_sound_path(value: object) -> str:
     if bundled_candidate.exists():
         return str(bundled_candidate)
 
-    app_candidate = APP_DIR / "_internal" / "sounds" / path.name
+    app_candidate = INSTALL_DIR / "_internal" / "sounds" / path.name
     if app_candidate.exists():
         return str(app_candidate)
 

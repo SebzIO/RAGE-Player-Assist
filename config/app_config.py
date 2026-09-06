@@ -59,8 +59,10 @@ INSTALL_DIR = _app_base_dir()
 RESOURCE_DIR = _resource_base_dir()
 CONFIG_FILE = APP_DIR / "app_config.json"
 DEFAULT_STORAGE_PATH = ""
+DEFAULT_FIVEM_SESSION_PATH = str(Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local"))) / "GTAW-Log-Parser-FiveM" / "current-session.txt")
+DEFAULT_CHAT_SOURCE = "ragemp"  # "ragemp" | "fivem"
 APP_NAME = "RAGE Player Assist"
-SOURCE_APP_VERSION = "1.0.6"
+SOURCE_APP_VERSION = "1.1.0"
 GITHUB_OWNER = "SebzIO"
 GITHUB_REPO = "AdminAssist"
 GITHUB_RELEASES_URL = f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}/releases"
@@ -121,6 +123,11 @@ class AppConfig:
     file_logging_enabled: bool = False
     log_directory: str = ""
     log_debug_to_file: bool = False
+    # FiveM / GTAW integration
+    chat_source: str = DEFAULT_CHAT_SOURCE  # "ragemp" | "fivem"
+    fivem_session_path: str = DEFAULT_FIVEM_SESSION_PATH
+    fivem_use_live_nui: bool = False  # if true, pull directly from FiveM NUI WS (127.0.0.1:13172) instead of file-tail
+    fivem_live_poll_interval: float = 0.5
     category_overrides: list[CategoryOverride] = field(default_factory=list)
     detections: list[DetectionConfig] = field(default_factory=list)
 
@@ -193,6 +200,15 @@ def build_details() -> list[str]:
     return details
 
 
+def _coerce_chat_source(value: object) -> str:
+    raw = str(value or DEFAULT_CHAT_SOURCE).strip().lower()
+    if raw in {"ragemp", "rage", "rage_mp"}:
+        return "ragemp"
+    if raw in {"fivem", "gtaw", "gtaw_fivem"}:
+        return "fivem"
+    return DEFAULT_CHAT_SOURCE
+
+
 def load_config(config_path: Path = CONFIG_FILE) -> AppConfig:
     if not config_path.exists():
         config = default_config()
@@ -228,6 +244,12 @@ def load_config(config_path: Path = CONFIG_FILE) -> AppConfig:
         for item in data.get("category_overrides", [])
     ]
 
+    # FiveM fields with migration: old configs auto-fill defaults
+    raw_fivem_path = data.get("fivem_session_path", "")
+    if not str(raw_fivem_path).strip():
+        # if file exists at default, use it; else leave default
+        raw_fivem_path = DEFAULT_FIVEM_SESSION_PATH
+
     config = AppConfig(
         storage_path=data.get("storage_path", DEFAULT_STORAGE_PATH),
         mention_name=data.get("mention_name", ""),
@@ -238,6 +260,10 @@ def load_config(config_path: Path = CONFIG_FILE) -> AppConfig:
         file_logging_enabled=bool(data.get("file_logging_enabled", False)),
         log_directory=str(data.get("log_directory", "")),
         log_debug_to_file=bool(data.get("log_debug_to_file", False)),
+        chat_source=_coerce_chat_source(data.get("chat_source", DEFAULT_CHAT_SOURCE)),
+        fivem_session_path=str(raw_fivem_path or DEFAULT_FIVEM_SESSION_PATH),
+        fivem_use_live_nui=bool(data.get("fivem_use_live_nui", False)),
+        fivem_live_poll_interval=max(0.1, min(5.0, float(data.get("fivem_live_poll_interval", 0.5) or 0.5))),
         category_overrides=category_overrides,
         detections=detections or _default_detections(),
     )

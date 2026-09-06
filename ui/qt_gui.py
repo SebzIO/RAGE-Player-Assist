@@ -60,6 +60,8 @@ from config.app_config import (
     GITHUB_LATEST_RELEASE_API,
     GITHUB_RELEASES_URL,
     RESOURCE_DIR,
+    DEFAULT_CHAT_SOURCE,
+    DEFAULT_FIVEM_SESSION_PATH,
     AppConfig,
     CategoryOverride,
     DetectionConfig,
@@ -1352,8 +1354,8 @@ class FirstRunSetupDialog(QDialog):
 
         self.setWindowTitle(f"{APP_NAME} Setup")
         self.setModal(True)
-        self.resize(640, 420)
-        self.setMinimumSize(600, 380)
+        self.resize(720, 520)
+        self.setMinimumSize(680, 460)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 20, 20, 20)
@@ -1411,15 +1413,16 @@ class FirstRunSetupDialog(QDialog):
         layout.setSpacing(12)
 
         intro = QLabel(
-            "RAGE Player Assist watches your RageMP .storage file, matches detection rules, and plays alerts "
-            "for the lines you care about."
+            "RAGE Player Assist watches your chat log — RAGE MP (.storage) or FiveM GTAW (via GTAW Assistant) — "
+            "matches detection rules, and plays alerts for the lines you care about."
         )
         intro.setWordWrap(True)
         layout.addWidget(intro)
 
         bullets = QLabel(
             "This setup will help you:\n"
-            "• choose the storage file to monitor\n"
+            "• choose your chat source (RAGE MP or FiveM GTAW)\n"
+            "• pick the log file to monitor (or use Live NUI for FiveM)\n"
             "• set the mention name used by the default mention rule\n"
             "• review the default detections that ship with the app"
         )
@@ -1427,8 +1430,9 @@ class FirstRunSetupDialog(QDialog):
         layout.addWidget(bullets)
 
         note = QLabel(
-            "You can change any of this later from the main window. If you cancel, the app will still open, "
-            "but the watcher will not be ready to start."
+            "FiveM mode works with GTAW Assistant's session file (%LOCALAPPDATA%\\GTAW-Log-Parser-FiveM\\current-session.txt) "
+            "or directly via Live NUI (127.0.0.1:13172) — no GTAW Assistant required for live mode. "
+            "RAGE mode uses the classic .storage file. You can change any of this later from the main window."
         )
         note.setObjectName("hintLabel")
         note.setWordWrap(True)
@@ -1441,6 +1445,16 @@ class FirstRunSetupDialog(QDialog):
         layout = QFormLayout(page)
         layout.setHorizontalSpacing(12)
         layout.setVerticalSpacing(12)
+
+        # Chat source selector - cross-compatible
+        self.setup_source_combo = QComboBox()
+        self.setup_source_combo.addItems(["RAGE MP", "FiveM (GTAW)"])
+        # default from config
+        is_fivem_cfg = str(getattr(self.config, "chat_source", "ragemp")).lower() == "fivem"
+        self.setup_source_combo.setCurrentText("FiveM (GTAW)" if is_fivem_cfg else "RAGE MP")
+        self.setup_source_combo.currentTextChanged.connect(self._on_setup_source_changed)
+        self.setup_source_combo.setToolTip("RAGE MP uses .storage, FiveM uses GTAW Assistant's session file or Live NUI (127.0.0.1:13172).")
+        layout.addRow("Chat source", self.setup_source_combo)
 
         storage_widget = QWidget()
         storage_row = QHBoxLayout(storage_widget)
@@ -1457,16 +1471,45 @@ class FirstRunSetupDialog(QDialog):
         storage_row.addWidget(auto_detect_button)
         storage_row.addWidget(browse_button)
 
+        # FiveM widgets
+        fivem_widget = QWidget()
+        fivem_row = QHBoxLayout(fivem_widget)
+        fivem_row.setContentsMargins(0, 0, 0, 0)
+        fivem_row.setSpacing(8)
+        self.setup_fivem_edit = QLineEdit()
+        self.setup_fivem_edit.setPlaceholderText(r"Example: C:\Users\you\AppData\Local\GTAW-Log-Parser-FiveM\current-session.txt")
+        self.setup_fivem_edit.setText(getattr(self.config, "fivem_session_path", DEFAULT_FIVEM_SESSION_PATH))
+        self.setup_fivem_edit.textChanged.connect(self._refresh_finish_summary)
+        browse_fivem_btn = QPushButton("Browse")
+        browse_fivem_btn.clicked.connect(self._browse_setup_fivem)
+        auto_fivem_btn = QPushButton("Auto-Detect")
+        auto_fivem_btn.clicked.connect(self._auto_detect_setup_fivem)
+        fivem_row.addWidget(self.setup_fivem_edit, 1)
+        fivem_row.addWidget(auto_fivem_btn)
+        fivem_row.addWidget(browse_fivem_btn)
+        self.setup_fivem_live_check = QCheckBox("Use Live NUI (direct 127.0.0.1:13172, no file required)")
+        self.setup_fivem_live_check.setChecked(bool(getattr(self.config, "fivem_use_live_nui", False)))
+        self.setup_fivem_live_check.toggled.connect(self._on_setup_fivem_live_toggled)
+        self.setup_fivem_live_check.setToolTip("Pull directly from FiveM's DevTools WebSocket (fork of GTAW Assistant NuiChatReader). Falls back to file if unavailable.")
+
         self.mention_name_edit = QLineEdit()
         self.mention_name_edit.setPlaceholderText("Enter your in-game name")
         self.mention_name_edit.textChanged.connect(self._refresh_finish_summary)
 
         storage_hint = QLabel(
-            "Pick the RageMP .storage file that receives new chat lines. Use Auto-Detect to scan common RageMP install "
-            "locations across available drives."
+            "RAGE MP: Pick the .storage file. Use Auto-Detect to scan drives for RAGEMP/client_resources/*/.storage"
         )
         storage_hint.setObjectName("hintLabel")
         storage_hint.setWordWrap(True)
+        self.storage_hint_label = storage_hint
+
+        fivem_hint = QLabel(
+            "FiveM GTAW: GTAW Assistant captures chat via FiveM NUI (127.0.0.1:13172 → nui://game/ui/root.html → wss) "
+            "and writes current-session.txt. Live NUI bypasses the file and reads the NUI directly."
+        )
+        fivem_hint.setObjectName("hintLabel")
+        fivem_hint.setWordWrap(True)
+        self.fivem_hint_label = fivem_hint
 
         mention_hint = QLabel(
             "The default Mention rule uses this name. Leave it blank only if you plan to disable mention-based detections."
@@ -1476,8 +1519,15 @@ class FirstRunSetupDialog(QDialog):
 
         layout.addRow("Storage file", storage_widget)
         layout.addRow("", storage_hint)
+        layout.addRow("FiveM session file", fivem_widget)
+        layout.addRow("", self.setup_fivem_live_check)
+        layout.addRow("", fivem_hint)
         layout.addRow("Mention name", self.mention_name_edit)
         layout.addRow("", mention_hint)
+        # keep refs for toggling
+        self._storage_widget = storage_widget
+        self._fivem_widget = fivem_widget
+        self._on_setup_source_changed(self.setup_source_combo.currentText())
         self._add_page(page)
 
     def _build_detection_page(self) -> None:
@@ -1572,6 +1622,56 @@ class FirstRunSetupDialog(QDialog):
             self.storage_path_edit.setText(selection)
             self.message_label.setText(f"Auto-detected storage file selected: {selection}")
 
+    def _on_setup_source_changed(self, text: str) -> None:
+        is_fivem = text.startswith("FiveM")
+        # Guards for early call before widgets exist
+        if hasattr(self, "_storage_widget"):
+            self._storage_widget.setEnabled(not is_fivem)
+        if hasattr(self, "_fivem_widget"):
+            self._fivem_widget.setEnabled(is_fivem)
+        if hasattr(self, "setup_fivem_live_check"):
+            self.setup_fivem_live_check.setEnabled(is_fivem)
+        if hasattr(self, "setup_fivem_edit"):
+            self.setup_fivem_edit.setEnabled(is_fivem and not self.setup_fivem_live_check.isChecked())
+        if hasattr(self, "fivem_hint_label"):
+            self.fivem_hint_label.setEnabled(is_fivem)
+        if hasattr(self, "storage_hint_label"):
+            self.storage_hint_label.setEnabled(not is_fivem)
+        self._refresh_finish_summary()
+
+    def _on_setup_fivem_live_toggled(self, checked: bool) -> None:
+        is_fivem = self.setup_source_combo.currentText().startswith("FiveM")
+        if hasattr(self, "setup_fivem_edit"):
+            self.setup_fivem_edit.setEnabled(is_fivem and not checked)
+        if hasattr(self, "_fivem_widget"):
+            self._fivem_widget.setEnabled(is_fivem and not checked)
+        self._refresh_finish_summary()
+
+    def _browse_setup_fivem(self) -> None:
+        start = self.setup_fivem_edit.text().strip() or DEFAULT_FIVEM_SESSION_PATH
+        parent = str(Path(start).parent) if Path(start).parent.exists() else ""
+        path, _ = QFileDialog.getOpenFileName(self, "Select GTAW FiveM Session File", parent, "Text files (*.txt);;All files (*.*)")
+        if path:
+            self.setup_fivem_edit.setText(path)
+
+    def _auto_detect_setup_fivem(self) -> None:
+        try:
+            from filehandler.fivem_chat import FIVEM_SESSION_FILE, discover_fivem_session_paths
+
+            candidates = discover_fivem_session_paths()
+            if candidates:
+                self.setup_fivem_edit.setText(str(candidates[0]))
+                self.message_label.setText(f"Auto-detected FiveM log: {candidates[0]}")
+                return
+            if FIVEM_SESSION_FILE.exists():
+                self.setup_fivem_edit.setText(str(FIVEM_SESSION_FILE))
+                self.message_label.setText(f"FiveM log at default: {FIVEM_SESSION_FILE}")
+                return
+        except Exception as e:
+            self.message_label.setText(f"FiveM auto-detect failed: {e}")
+            return
+        self.message_label.setText(f"FiveM log not found at {DEFAULT_FIVEM_SESSION_PATH} - run GTAW Assistant or enable Live NUI.")
+
     def _go_back(self) -> None:
         self.stack.setCurrentIndex(max(0, self.stack.currentIndex() - 1))
         self._refresh_buttons()
@@ -1591,12 +1691,25 @@ class FirstRunSetupDialog(QDialog):
         self.message_label.setText("")
 
     def _refresh_finish_summary(self) -> None:
-        storage_text = self.storage_path_edit.text().strip() or "Not set yet"
+        # Guard: called during _build_storage_page before _build_finish_page creates summary_label
+        if not hasattr(self, "summary_label"):
+            return
+        source = "FiveM (GTAW)" if self.setup_source_combo.currentText().startswith("FiveM") else "RAGE MP"
+        if source.startswith("FiveM"):
+            if self.setup_fivem_live_check.isChecked():
+                fivem_text = "Live NUI (127.0.0.1:13172, no file)"
+            else:
+                fivem_text = self.setup_fivem_edit.text().strip() or "Not set yet"
+            path_line = f"FiveM source: {fivem_text}"
+        else:
+            storage_text = self.storage_path_edit.text().strip() or "Not set yet"
+            path_line = f"Storage file: {storage_text}"
         mention_text = self.mention_name_edit.text().strip() or "Blank"
         self.summary_label.setText(
             "\n".join(
                 [
-                    f"Storage file: {storage_text}",
+                    f"Chat source: {source}",
+                    path_line,
                     f"Mention name: {mention_text}",
                     f"Default detections: {len(self.config.detections)}",
                 ]
@@ -1607,18 +1720,33 @@ class FirstRunSetupDialog(QDialog):
         if self.stack.currentIndex() != 1:
             return True
 
-        storage_path = self.storage_path_edit.text().strip()
-        if not storage_path:
-            self.message_label.setText("Choose the RageMP .storage file before continuing.")
-            return False
+        is_fivem = self.setup_source_combo.currentText().startswith("FiveM")
+        if is_fivem:
+            if not self.setup_fivem_live_check.isChecked():
+                fivem_path = self.setup_fivem_edit.text().strip()
+                if not fivem_path:
+                    self.message_label.setText("Choose the FiveM GTAW session file or enable Live NUI.")
+                    return False
+                fivem_file = Path(fivem_path)
+                if not fivem_file.exists():
+                    self.message_label.setText(f"FiveM session path does not exist: {fivem_file}")
+                    return False
+                if not fivem_file.is_file():
+                    self.message_label.setText(f"FiveM session path is not a file: {fivem_file}")
+                    return False
+        else:
+            storage_path = self.storage_path_edit.text().strip()
+            if not storage_path:
+                self.message_label.setText("Choose the RageMP .storage file before continuing.")
+                return False
 
-        storage_file = Path(storage_path)
-        if not storage_file.exists():
-            self.message_label.setText(f"Storage path does not exist: {storage_file}")
-            return False
-        if not storage_file.is_file():
-            self.message_label.setText(f"Storage path is not a file: {storage_file}")
-            return False
+            storage_file = Path(storage_path)
+            if not storage_file.exists():
+                self.message_label.setText(f"Storage path does not exist: {storage_file}")
+                return False
+            if not storage_file.is_file():
+                self.message_label.setText(f"Storage path is not a file: {storage_file}")
+                return False
 
         mention_name = self.mention_name_edit.text().strip()
         mention_required = any(d.rule_type == "mention" and d.enabled for d in self.config.detections)
@@ -1638,7 +1766,11 @@ class FirstRunSetupDialog(QDialog):
             self._refresh_buttons()
             return
 
+        is_fivem = self.setup_source_combo.currentText().startswith("FiveM")
+        self.config.chat_source = "fivem" if is_fivem else "ragemp"
         self.config.storage_path = self.storage_path_edit.text().strip()
+        self.config.fivem_session_path = self.setup_fivem_edit.text().strip() or DEFAULT_FIVEM_SESSION_PATH
+        self.config.fivem_use_live_nui = bool(self.setup_fivem_live_check.isChecked()) if is_fivem else False
         self.config.mention_name = self.mention_name_edit.text().strip()
         save_config(self.config)
         self.accept()
@@ -1663,8 +1795,8 @@ class PlayerAssistWindow(QMainWindow):
 
         self.setWindowTitle(APP_NAME)
         self.setWindowIcon(self.app_icon)
-        self.resize(1260, 820)
-        self.setMinimumSize(980, 680)
+        self.resize(1380, 880)
+        self.setMinimumSize(1120, 720)
         self._build_ui()
         self._apply_styles()
         self._load_config_into_form()
@@ -1728,19 +1860,50 @@ class PlayerAssistWindow(QMainWindow):
         watcher_layout = QGridLayout(watcher_group)
         watcher_layout.setHorizontalSpacing(10)
         watcher_layout.setVerticalSpacing(10)
+        # Chat source selector (RAGE vs FiveM)
+        self.chat_source_combo = QComboBox()
+        self.chat_source_combo.addItems(["RAGE MP", "FiveM (GTAW)"])
+        self.chat_source_combo.setToolTip("Choose chat source: RAGE MP .storage or FiveM GTAW (via GTAW Assistant).")
+        self.chat_source_combo.currentTextChanged.connect(self._on_chat_source_changed)
         self.storage_path_edit = QLineEdit()
         self.storage_path_edit.setToolTip("Path to RageMP's .storage file that contains the chat log.")
         self.storage_path_edit.setPlaceholderText(r"Example: E:\RAGEMP\client_resources\...\ .storage")
         browse_storage_button = QPushButton("Browse")
         browse_storage_button.clicked.connect(self._browse_storage)
+        # FiveM session file (GTAW Assistant current-session.txt)
+        self.fivem_session_edit = QLineEdit()
+        self.fivem_session_edit.setToolTip("Path to GTAW Assistant's FiveM session file (current-session.txt). Auto-detected from %LOCALAPPDATA%\\GTAW-Log-Parser-FiveM.")
+        self.fivem_session_edit.setPlaceholderText(r"Example: C:\Users\you\AppData\Local\GTAW-Log-Parser-FiveM\current-session.txt")
+        self.fivem_session_edit.textChanged.connect(self._update_fivem_live_enabled)
+        browse_fivem_button = QPushButton("Browse")
+        browse_fivem_button.clicked.connect(self._browse_fivem_session)
+        auto_fivem_button = QPushButton("Auto-Detect")
+        auto_fivem_button.setToolTip("Auto-detect GTAW session file at %LOCALAPPDATA%\\GTAW-Log-Parser-FiveM\\current-session.txt")
+        auto_fivem_button.clicked.connect(self._auto_detect_fivem)
+        self.fivem_live_checkbox = QCheckBox("Live NUI (direct FiveM DevTools)")
+        self.fivem_live_checkbox.setToolTip("Pull directly from FiveM's local NUI DevTools (http://127.0.0.1:13172) instead of tailing the GTAW session file. Requires FiveM + GTAW HUD loaded. Falls back to file-tail if unavailable. (fork of GTAW Assistant NuiChatReader)")
+        self.fivem_live_checkbox.toggled.connect(self._on_fivem_live_toggled)
         self.mention_name_edit = QLineEdit()
         self.mention_name_edit.setToolTip("Name to use for mention detection when rule type is 'mention'.")
         self.mention_name_edit.setPlaceholderText("Enter your in-game name")
-        watcher_layout.addWidget(QLabel("Storage file"), 0, 0)
-        watcher_layout.addWidget(self.storage_path_edit, 0, 1)
-        watcher_layout.addWidget(browse_storage_button, 0, 2)
-        watcher_layout.addWidget(QLabel("Mention name"), 1, 0)
-        watcher_layout.addWidget(self.mention_name_edit, 1, 1, 1, 2)
+        watcher_layout.addWidget(QLabel("Chat source"), 0, 0)
+        watcher_layout.addWidget(self.chat_source_combo, 0, 1, 1, 2)
+        watcher_layout.addWidget(QLabel("Storage file"), 1, 0)
+        watcher_layout.addWidget(self.storage_path_edit, 1, 1)
+        watcher_layout.addWidget(browse_storage_button, 1, 2)
+        # FiveM row: label + edit + browse + auto
+        watcher_layout.addWidget(QLabel("FiveM log"), 2, 0)
+        fivem_row_widget = QWidget()
+        fivem_row_layout = QHBoxLayout(fivem_row_widget)
+        fivem_row_layout.setContentsMargins(0, 0, 0, 0)
+        fivem_row_layout.setSpacing(6)
+        fivem_row_layout.addWidget(self.fivem_session_edit, 1)
+        fivem_row_layout.addWidget(browse_fivem_button)
+        fivem_row_layout.addWidget(auto_fivem_button)
+        watcher_layout.addWidget(fivem_row_widget, 2, 1, 1, 2)
+        watcher_layout.addWidget(self.fivem_live_checkbox, 3, 1, 1, 2)
+        watcher_layout.addWidget(QLabel("Mention name"), 4, 0)
+        watcher_layout.addWidget(self.mention_name_edit, 4, 1, 1, 2)
         top_row.addWidget(watcher_group, 3)
 
         runtime_group = QGroupBox("Runtime")
@@ -1804,6 +1967,7 @@ class PlayerAssistWindow(QMainWindow):
         body_splitter.addWidget(center_splitter)
 
         detections_group = QGroupBox("Detections")
+        detections_group.setMinimumWidth(540)
         detections_layout = QVBoxLayout(detections_group)
         detections_layout.setSpacing(8)
         filter_row = QHBoxLayout()
@@ -1844,18 +2008,28 @@ class PlayerAssistWindow(QMainWindow):
         center_splitter.addWidget(detections_group)
 
         overview_group = QGroupBox("Selected Detection")
+        overview_group.setMinimumWidth(460)
         overview_layout = QFormLayout(overview_group)
         overview_layout.setContentsMargins(16, 20, 16, 16)
         overview_layout.setHorizontalSpacing(16)
-        overview_layout.setVerticalSpacing(12)
+        overview_layout.setVerticalSpacing(10)
+        overview_layout.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
+        overview_layout.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self.selected_name_value = QLabel("No detection selected")
         self.selected_name_value.setObjectName("overviewValueBold")
+        self.selected_name_value.setWordWrap(True)
+        self.selected_name_value.setMinimumWidth(200)
         self.selected_category_value = QLabel("-")
+        self.selected_category_value.setWordWrap(True)
         self.selected_type_value = QLabel("-")
+        self.selected_type_value.setWordWrap(True)
         self.selected_sound_value = QLabel("-")
+        self.selected_sound_value.setWordWrap(True)
         self.selected_behavior_value = QLabel("-")
+        self.selected_behavior_value.setWordWrap(True)
         self.selected_status_value = QLabel("-")
         self.selected_status_value.setObjectName("overviewStatus")
+        self.selected_status_value.setWordWrap(True)
         overview_layout.addRow("Name", self.selected_name_value)
         overview_layout.addRow("Category", self.selected_category_value)
         overview_layout.addRow("Type", self.selected_type_value)
@@ -1863,7 +2037,12 @@ class PlayerAssistWindow(QMainWindow):
         overview_layout.addRow("Behavior", self.selected_behavior_value)
         overview_layout.addRow("Status", self.selected_status_value)
         center_splitter.addWidget(overview_group)
-        center_splitter.setSizes([520, 440])
+        # Balanced for 1380 width @ 1440p with 125-150% scaling; keep overview legible
+        center_splitter.setSizes([640, 520])
+        center_splitter.setStretchFactor(0, 3)
+        center_splitter.setStretchFactor(1, 2)
+        center_splitter.setCollapsible(0, False)
+        center_splitter.setCollapsible(1, False)
 
         log_group = QGroupBox("Activity Log")
         log_layout = QVBoxLayout(log_group)
@@ -2124,8 +2303,16 @@ class PlayerAssistWindow(QMainWindow):
         self.setStyleSheet(stylesheet)
 
     def _needs_first_time_setup(self) -> bool:
-        if not self.config.storage_path.strip():
-            return True
+        source = str(getattr(self.config, "chat_source", "ragemp")).lower()
+        if source == "fivem":
+            if bool(getattr(self.config, "fivem_use_live_nui", False)):
+                # live NUI needs no file on disk
+                pass
+            elif not str(getattr(self.config, "fivem_session_path", "")).strip():
+                return True
+        else:
+            if not self.config.storage_path.strip():
+                return True
 
         mention_required = any(d.rule_type == "mention" and d.enabled for d in self.config.detections)
         return mention_required and not self.config.mention_name.strip()
@@ -2151,17 +2338,25 @@ class PlayerAssistWindow(QMainWindow):
         self._append_log("First-time setup complete.")
 
     def _load_config_into_form(self) -> None:
+        with QSignalBlocker(self.chat_source_combo):
+            self.chat_source_combo.setCurrentText("FiveM (GTAW)" if str(getattr(self.config, "chat_source", "ragemp")).lower() == "fivem" else "RAGE MP")
         self.storage_path_edit.setText(self.config.storage_path)
+        self.fivem_session_edit.setText(getattr(self.config, "fivem_session_path", DEFAULT_FIVEM_SESSION_PATH))
+        self.fivem_live_checkbox.setChecked(bool(getattr(self.config, "fivem_use_live_nui", False)))
         self.mention_name_edit.setText(self.config.mention_name)
         self.global_mute_checkbox.setChecked(self.config.global_mute)
         self.theme_combo.setCurrentText(self.config.theme if self.config.theme in THEMES else "Latte Light")
+        self._on_chat_source_changed(self.chat_source_combo.currentText())
         self._set_dirty(False)
 
     def _connect_dirty_signals(self) -> None:
+        self.chat_source_combo.currentTextChanged.connect(self._mark_dirty)
         self.storage_path_edit.textChanged.connect(self._mark_dirty)
+        self.fivem_session_edit.textChanged.connect(self._mark_dirty)
+        self.fivem_live_checkbox.toggled.connect(self._mark_dirty)
         self.mention_name_edit.textChanged.connect(self._mark_dirty)
         self.global_mute_checkbox.toggled.connect(self._mark_dirty)
-        self.theme_combo.currentTextChanged.connect(self._mark_dirty)
+        # theme auto-saves via _on_theme_changed, don't mark dirty there
 
     def _mark_dirty(self, *_args) -> None:
         self._set_dirty(True)
@@ -2175,8 +2370,12 @@ class PlayerAssistWindow(QMainWindow):
         self.setWindowTitle(f"{APP_NAME} v{APP_VERSION}{suffix}")
 
     def _has_pending_form_changes(self) -> bool:
+        current_source = "fivem" if self.chat_source_combo.currentText().startswith("FiveM") else "ragemp"
         return (
-            self.storage_path_edit.text().strip() != self.config.storage_path
+            current_source != str(getattr(self.config, "chat_source", "ragemp")).lower()
+            or self.storage_path_edit.text().strip() != self.config.storage_path
+            or self.fivem_session_edit.text().strip() != getattr(self.config, "fivem_session_path", DEFAULT_FIVEM_SESSION_PATH)
+            or self.fivem_live_checkbox.isChecked() != bool(getattr(self.config, "fivem_use_live_nui", False))
             or self.mention_name_edit.text().strip() != self.config.mention_name
             or self.global_mute_checkbox.isChecked() != self.config.global_mute
             or self.theme_combo.currentText() != self.config.theme
@@ -2244,10 +2443,86 @@ class PlayerAssistWindow(QMainWindow):
         if path:
             self.storage_path_edit.setText(path)
 
+    def _browse_fivem_session(self) -> None:
+        start = self.fivem_session_edit.text().strip() or DEFAULT_FIVEM_SESSION_PATH
+        path, _ = QFileDialog.getOpenFileName(self, "Select GTAW FiveM Session File", str(Path(start).parent), "Text files (*.txt);;All files (*.*)")
+        if path:
+            self.fivem_session_edit.setText(path)
+
+    def _auto_detect_fivem(self) -> None:
+        try:
+            from filehandler.fivem_chat import FIVEM_SESSION_FILE, discover_fivem_session_paths
+
+            candidates = discover_fivem_session_paths()
+            if candidates:
+                self.fivem_session_edit.setText(str(candidates[0]))
+                self._append_log(f"Auto-detected FiveM log: {candidates[0]}")
+                return
+            # Fallback: check default path existence
+            if FIVEM_SESSION_FILE.exists():
+                self.fivem_session_edit.setText(str(FIVEM_SESSION_FILE))
+                self._append_log(f"FiveM log at default: {FIVEM_SESSION_FILE}")
+                return
+        except Exception as e:
+            self._append_log(f"FiveM auto-detect failed: {e}")
+            return
+        self._append_log(f"FiveM log not found at {DEFAULT_FIVEM_SESSION_PATH} - is GTAW Assistant running?")
+
+    def _on_chat_source_changed(self, text: str) -> None:
+        is_fivem = text.startswith("FiveM")
+        # Enable/disable relevant fields; keep both visible for clarity but dim inactive
+        self.storage_path_edit.setEnabled(not is_fivem)
+        self.fivem_session_edit.setEnabled(is_fivem and not self.fivem_live_checkbox.isChecked())
+        self.fivem_live_checkbox.setEnabled(is_fivem)
+        # Update start button tooltip
+        try:
+            self.start_button.setToolTip("Start watching FiveM GTAW chat (live NUI or session file)." if is_fivem else "Start watching the RageMP storage file for new chat lines.")
+        except Exception:
+            pass
+
+    def _on_fivem_live_toggled(self, checked: bool) -> None:
+        is_fivem = self.chat_source_combo.currentText().startswith("FiveM")
+        self.fivem_session_edit.setEnabled(is_fivem and not checked)
+        self._mark_dirty()
+
+    def _update_fivem_live_enabled(self, *_a) -> None:
+        # placeholder for live text change hook
+        pass
+
     def _log_startup_validation(self) -> None:
+        source = str(getattr(self.config, "chat_source", "ragemp")).lower()
+        if source == "fivem":
+            if bool(getattr(self.config, "fivem_use_live_nui", False)):
+                self._append_log("Startup check: FiveM source = live NUI (127.0.0.1:13172) - will connect on Start.")
+                # Also probe briefly
+                try:
+                    from filehandler.fivem_live import probe_fivem_nui
+
+                    info = probe_fivem_nui(timeout=1.0)
+                    if not info.get("nui_available"):
+                        self._append_log("Startup check: FiveM NUI not yet available (is FiveM running?) - fallback to file-tail will be used if Start fails.")
+                except Exception:
+                    pass
+                return
+            fivem_path = Path(getattr(self.config, "fivem_session_path", DEFAULT_FIVEM_SESSION_PATH))
+            if not str(fivem_path).strip():
+                self._append_log("Startup check: FiveM session path not set.")
+                return
+            if not fivem_path.exists():
+                self._append_log(f"Startup check: FiveM session file missing: {fivem_path}")
+
+                # Suggest default
+                if fivem_path != Path(DEFAULT_FIVEM_SESSION_PATH) and Path(DEFAULT_FIVEM_SESSION_PATH).exists():
+                    self._append_log(f"Startup check: default FiveM log exists at {DEFAULT_FIVEM_SESSION_PATH}")
+            elif not fivem_path.is_file():
+                self._append_log(f"Startup check: FiveM path is not a file: {fivem_path}")
+            else:
+                self._append_log(f"Startup check: FiveM session ready: {fivem_path} ({fivem_path.stat().st_size} bytes)")
+            return
+        # RAGE path
         storage_path = Path(self.config.storage_path)
         if not self.config.storage_path.strip():
-            self._append_log("Startup check: no storage path is configured yet.")
+            self._append_log("Startup check: no storage path is configured yet (RAGE MP). Switch to FiveM or set RAGE .storage.")
             return
         if not storage_path.exists():
             self._append_log(f"Startup check: saved storage path is missing: {storage_path}")
@@ -2456,20 +2731,38 @@ class PlayerAssistWindow(QMainWindow):
             self._append_log("Updated category audio overrides.")
 
     def _collect_config(self) -> AppConfig | None:
+        chat_source = "fivem" if self.chat_source_combo.currentText().startswith("FiveM") else "ragemp"
         storage_path = self.storage_path_edit.text().strip()
-        if not storage_path:
-            self._append_log("Storage path is required.")
-            return None
-        if not Path(storage_path).exists():
-            self._append_log(f"Storage path does not exist: {storage_path}")
-            return None
-        if not Path(storage_path).is_file():
-            self._append_log(f"Storage path is not a file: {storage_path}")
-            return None
+        fivem_path = self.fivem_session_edit.text().strip()
+        fivem_live = self.fivem_live_checkbox.isChecked()
+        if chat_source == "fivem":
+            if not fivem_live:
+                if not fivem_path:
+                    self._append_log("FiveM session path is required (or enable Live NUI).")
+                    return None
+                if not Path(fivem_path).exists():
+                    self._append_log(f"FiveM session path does not exist: {fivem_path}")
+                    return None
+                if not Path(fivem_path).is_file():
+                    self._append_log(f"FiveM session path is not a file: {fivem_path}")
+                    return None
+        else:
+            if not storage_path:
+                self._append_log("Storage path is required for RAGE MP.")
+                return None
+            if not Path(storage_path).exists():
+                self._append_log(f"Storage path does not exist: {storage_path}")
+                return None
+            if not Path(storage_path).is_file():
+                self._append_log(f"Storage path is not a file: {storage_path}")
+                return None
         mention_name = self.mention_name_edit.text().strip()
         if any(d.rule_type == "mention" and not mention_name for d in self.config.detections if d.enabled):
             self._append_log("Mention name is required while mention detections are enabled.")
             return None
+        self.config.chat_source = chat_source
+        self.config.fivem_session_path = fivem_path or DEFAULT_FIVEM_SESSION_PATH
+        self.config.fivem_use_live_nui = bool(fivem_live)
         self.config.storage_path = storage_path
         self.config.mention_name = mention_name
         self.config.global_mute = self.global_mute_checkbox.isChecked()
@@ -2481,6 +2774,15 @@ class PlayerAssistWindow(QMainWindow):
             return
         self.config.theme = theme_name
         self._apply_styles()
+        # QoL: persist theme immediately without requiring Save
+        try:
+            save_config(self.config)
+            # clear dirty if only theme changed
+            if not self._has_pending_form_changes():
+                self._set_dirty(False)
+            self._append_log(f"Theme saved: {theme_name}")
+        except Exception as error:
+            self._append_log(f"Could not save theme: {error}")
 
     def save_current_config(self) -> None:
         config = self._collect_config()

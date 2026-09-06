@@ -3,13 +3,22 @@ from __future__ import annotations
 
 import ctypes
 import re
+import sys
 import time
 from pathlib import Path
 from threading import Event
 from typing import Callable
 
+# UTF-8 for console prints of GTAW emoji
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 from config.app_config import AppConfig, CategoryOverride, DetectionConfig, load_config
-from filehandler.readstorage import watch_chat
+from filehandler.readstorage import watch_chat as watch_ragemp_chat
 
 
 LogFunc = Callable[[str], None]
@@ -306,6 +315,34 @@ def handle_line(
                 )
 
 
+def _resolve_watcher(config: AppConfig):
+    """Return (watcher_callable, kwargs) for the configured chat source.
+
+    Keeps the detection engine identical - only the source generator changes.
+    """
+    source = getattr(config, "chat_source", "ragemp")
+    if str(source).lower() == "fivem":
+        # Live NUI path bypasses the file entirely (direct CDP WS)
+        if bool(getattr(config, "fivem_use_live_nui", False)):
+            try:
+                from filehandler.fivem_live import watch_fivem_live
+
+                def _live_wrapper(**kw):
+                    # adapt signature: watch_fivem_live(poll_interval, debug, ...)
+                    poll = float(getattr(config, "fivem_live_poll_interval", 0.5) or 0.5)
+                    return watch_fivem_live(poll_interval=kw.get("poll_interval", poll), debug=kw.get("debug", False))
+
+                return _live_wrapper, {}
+            except ImportError:
+                pass  # fall back to file-tail if websocket deps missing
+        # Default FiveM: tail GTAW Assistant's current-session.txt
+        from filehandler.fivem_chat import watch_fivem_chat
+
+        return watch_fivem_chat, {"session_path": Path(config.fivem_session_path)}
+    # Default: RAGE MP
+    return watch_ragemp_chat, {"storage_path": Path(config.storage_path)}
+
+
 def main(
     config: AppConfig | None = None,
     debug: bool = False,
@@ -315,16 +352,34 @@ def main(
 ) -> None:
     active_config = config or load_config()
     log = logger or _default_logger
-    storage_path = Path(active_config.storage_path)
     last_triggered: dict[str, float] = {}
 
-    for line in watch_chat(
-        storage_path=storage_path,
-        debug=debug,
-        replay_last=replay_last,
-        stop_event=stop_event,
-        logger=log,
-    ):
+    watcher, extra_kwargs = _resolve_watcher(active_config)
+
+    # Build common kwargs shared by all watchers
+    watcher_kwargs: dict = {
+        "debug": debug,
+        "replay_last": replay_last,
+        "stop_event": stop_event,
+        "logger": log,
+    }
+    # Most watchers support poll_interval/poll-interval variant; keep default
+    watcher_kwargs.update(extra_kwargs)
+
+    # Log which source is active (useful for GUI activity log)
+    try:
+        source_label = getattr(active_config, "chat_source", "ragemp")
+        if str(source_label).lower() == "fivem":
+            if bool(getattr(active_config, "fivem_use_live_nui", False)):
+                log(f"Watcher source: FiveM (live NUI 127.0.0.1:13172)")
+            else:
+                log(f"Watcher source: FiveM (file {active_config.fivem_session_path})")
+        else:
+            log(f"Watcher source: RAGE MP ({active_config.storage_path})")
+    except Exception:
+        pass
+
+    for line in watcher(**watcher_kwargs):
         handle_line(
             line,
             config=active_config,

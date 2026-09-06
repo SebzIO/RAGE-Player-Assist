@@ -1,3 +1,4 @@
 pygame
 pyinstaller
 PySide6
+websocket-client

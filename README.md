@@ -1,6 +1,6 @@
 # RAGE Player Assist
 
-RAGE Player Assist is a Windows desktop companion for monitoring a RageMP `.storage` chat feed and surfacing the lines that matter.
+RAGE Player Assist is a Windows desktop companion for monitoring RageMP **and** FiveM GTAW chat feeds and surfacing the lines that matter. v1.1.0 adds cross-compatible FiveM support via GTAW Assistant.
 
 It is built for situations where important chat activity can be easy to miss: private messages, name mentions, staff-related keywords, reports, or any custom pattern you want to track. Instead of watching the game window constantly, you can let the app monitor the feed in real time and alert you when a configured rule matches.
 
@@ -10,10 +10,16 @@ The project is local-first, lightweight in scope, and designed to keep working w
 
 At its core, RAGE Player Assist is a configurable chat watcher:
 
-- it reads a RageMP `.storage` file as new lines are written
+- it reads a RageMP `.storage` file **or** a FiveM GTAW log (via GTAW Assistant) as new lines are written
 - it compares those lines against user-defined detection rules
 - it logs matches and can play sounds when those rules fire
 - it can stay running in the background through the system tray
+
+Chat sources are selectable in the GUI and `app_config.json:chat_source` (`ragemp` | `fivem`):
+
+- **RAGE MP**: tails the `.storage` JSON `chat_log` ( `filehandler/readstorage.py:37` )
+- **FiveM (GTAW) file-tail**: tails `%LOCALAPPDATA%\GTAW-Log-Parser-FiveM\current-session.txt` written by GTAW Assistant (`filehandler/fivem_chat.py:48`)
+- **FiveM Live NUI** (no file): forks GTAW Assistant's `NuiChatReader` — polls `http://127.0.0.1:13172/json` → `nui://game/ui/root.html` → `https://cfx-nui-client...` → `Runtime.evaluate` on `.chat__messages > li` (`filehandler/fivem_live.py:1`). Requires FiveM + GTAW HUD; `websocket-client` is optional otherwise falls back to file-tail.
 
 This makes it useful for staff workflows, moderation workflows, and any playstyle where fast awareness matters more than constantly scanning chat manually.
 
@@ -32,14 +38,15 @@ If you already know exactly which chat events you care about, this app is meant 
 
 The current app includes:
 
-- real-time monitoring of a RageMP `.storage` file
+- real-time monitoring of a RageMP `.storage` file **and** FiveM GTAW logs (v1.1.0)
+- chat-source selector (RAGE MP vs FiveM GTAW) with Live NUI vs file-tail toggle
 - detection rules using `contains`, `mention`, and `regex`
 - per-rule sound files
 - per-rule cooldowns
 - per-rule volume controls
 - category-based mute and volume overrides
 - global mute support
-- a PySide6 desktop GUI
+- a PySide6 desktop GUI (theme auto-saves on switch)
 - system tray support for background use
 - optional file logging
 - config import and export
@@ -134,11 +141,12 @@ python .\main.py --console --debug --replay-last 25
 
 On first launch:
 
-1. Choose the RageMP `.storage` file to monitor.
-2. Set your mention name if you plan to use mention-based detections.
-3. Review the default detection rules.
-4. Save your configuration.
-5. Start the watcher.
+1. Choose your chat source: **RAGE MP** or **FiveM (GTAW)**.
+2. Pick the log: RAGE `.storage` file (auto-detect available) or FiveM `current-session.txt` (`%LOCALAPPDATA%\GTAW-Log-Parser-FiveM\current-session.txt` auto-detect) — or enable **Live NUI (127.0.0.1:13172)** for direct FiveM DevTools polling (no file needed, fork of GTAW Assistant).
+3. Set your mention name if you plan to use mention-based detections.
+4. Review the default detection rules.
+5. Save your configuration.
+6. Start the watcher.
 
 If no config exists yet, the app creates `app_config.json` automatically.
 
@@ -148,7 +156,8 @@ The GUI is the primary interface.
 
 From the main window, you can:
 
-- choose the storage file
+- choose the chat source (RAGE MP / FiveM GTAW) and Live NUI vs file-tail
+- choose the storage file (RAGE) or FiveM session file (auto-detect) 
 - define your mention name
 - start and stop the watcher
 - enable debug logging
@@ -166,13 +175,14 @@ If tray support is available and close-to-tray is enabled, closing the window hi
 
 ## Configuration And Data
 
-The main config file is `app_config.json`.
+The main config file is `app_config.json` (`%LOCALAPPDATA%\RAGE Player Assist\app_config.json` when installed, else next to exe).
 
 It stores:
 
-- the selected storage file path
+- `chat_source` (`ragemp` | `fivem`) and `fivem_use_live_nui`
+- the selected storage file path (`storage_path` for RAGE) and FiveM session path (`fivem_session_path`, default `%LOCALAPPDATA%\GTAW-Log-Parser-FiveM\current-session.txt`)
 - your mention name
-- theme selection
+- theme selection (auto-saves on switch)
 - mute settings
 - logging settings
 - category overrides
@@ -229,10 +239,10 @@ If needed, the workflow can also be run manually against an existing release tag
 Important files and folders:
 
 - `main.py`: application entry point
-- `config/`: config loading, defaults, and persistence
-- `detections/`: detection and sound logic
-- `filehandler/`: chat/storage watcher logic
-- `ui/`: desktop UI
+- `config/`: config loading, defaults, and persistence (`app_config.py:114` now includes FiveM fields)
+- `detections/`: detection and sound logic (`linehandler.py:309` branches RAGE vs FiveM watchers)
+- `filehandler/`: chat/storage watcher logic (`readstorage.py`, `fivem_chat.py:48`, `fivem_live.py:1` fork of GTAW Assistant)
+- `ui/`: desktop UI (`qt_gui.py:53` source selector + first-time setup cross-compat)
 - `sounds/`: bundled alert sounds
 - `build_exe.ps1`: local build script
 - `rage_player_assist.spec`: PyInstaller spec
@@ -243,3 +253,4 @@ Important files and folders:
 - The packaged GUI build runs without a console window.
 - Sound playback uses `pygame` when available and falls back to Windows media APIs.
 - The app is local and file-based; it does not require a backend service.
+- FiveM Live NUI is a read-only localhost CDP WebSocket (`ws://127.0.0.1:13172`, `nui://game/ui/root.html` → `https://cfx-nui-client...`) — same source GTAW Assistant uses. Requires `websocket-client` (`requirements.txt:4`); file-tail works without it.

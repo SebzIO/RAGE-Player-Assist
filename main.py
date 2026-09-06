@@ -1,6 +1,15 @@
 #!/usr/bin/env python3
 """This script runs the main loop for the RAGE Player Assist program."""
 import argparse
+import sys
+
+# Ensure UTF-8 console on Windows (GTAW logs contain emoji / box-drawing)
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 
 from config.app_config import APP_NAME, load_config
 from detections.linehandler import main as run_line_handler
